@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ["v*.*.*"]
+  # Manual runs only build (to test the pipeline); publishing happens for tags.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,11 +13,13 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v6
+      # setup-uv publishes no floating major tag, so pin the exact release.
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Check tag matches __version__
+        if: github.ref_type == 'tag'
         shell: pwsh
         run: |
           $version = uv run python scripts/bump_version.py
@@ -37,13 +41,14 @@ jobs:
       - name: Check build output
         shell: pwsh
         run: |
-          $v = "${{ github.ref_name }}".TrimStart("v")
+          $v = uv run python scripts/bump_version.py
           foreach ($f in "dist/SwiftVirtualPrinter.exe", "dist/SwiftVirtualPrinter-Setup-$v.exe") {
             if (-not (Test-Path $f)) { throw "Missing $f" }
           }
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v3
         with:
           name: Swift Virtual Printer ${{ github.ref_name }}
           generate_release_notes: true
