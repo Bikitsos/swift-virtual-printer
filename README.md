@@ -131,6 +131,8 @@ Each exe build also records its build date and git commit, and the **About** scr
 
 You can follow progress under the repository's **Actions** tab. A release can also be started by pushing any `vX.Y.Z` tag by hand, as long as it matches `__version__`.
 
+To test the build pipeline without publishing anything, run the workflow by hand: `gh workflow run release.yml` (or **Actions → Release → Run workflow**). A manual run builds the exe and installer but skips the version check and publishing.
+
 `build.bat` installs the build dependencies, closes any running copy of the app, and builds `dist\SwiftVirtualPrinter.exe`: a single standalone file (about 40 MB) with no console window. Python does not need to be installed on the target machine. The exe accepts `--minimized`.
 
 If [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (`winget install JRSoftware.InnoSetup`), it also builds an installer, `dist\SwiftVirtualPrinter-Setup-<version>.exe`, from [installer.iss](installer.iss). The version number comes from `pyproject.toml`.
