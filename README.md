@@ -117,6 +117,20 @@ uv run python scripts/bump_version.py patch    # bump it
 
 Each exe build also records its build date and git commit, and the **About** screen (Help → About, or About in the tray menu) shows them.
 
+### Publishing a GitHub release
+
+```powershell
+.\release.bat patch    # or minor, major, or an exact X.Y.Z
+```
+
+`release.bat` checks that you are on `main` with no uncommitted changes, bumps the version, commits, creates the tag `vX.Y.Z` and pushes both. Pushing the tag starts the [Release workflow](.github/workflows/release.yml), which runs on a Windows runner and:
+
+1. checks that the tag matches `__version__`
+2. builds the exe and the installer with `build.bat`
+3. publishes a GitHub release with auto-generated release notes, with `SwiftVirtualPrinter.exe` and `SwiftVirtualPrinter-Setup-X.Y.Z.exe` attached
+
+You can follow progress under the repository's **Actions** tab. A release can also be started by pushing any `vX.Y.Z` tag by hand, as long as it matches `__version__`.
+
 `build.bat` installs the build dependencies, closes any running copy of the app, and builds `dist\SwiftVirtualPrinter.exe`: a single standalone file (about 40 MB) with no console window. Python does not need to be installed on the target machine. The exe accepts `--minimized`.
 
 If [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (`winget install JRSoftware.InnoSetup`), it also builds an installer, `dist\SwiftVirtualPrinter-Setup-<version>.exe`, from [installer.iss](installer.iss). The version number comes from `pyproject.toml`.

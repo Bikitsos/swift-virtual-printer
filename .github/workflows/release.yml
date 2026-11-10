@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Check tag matches __version__
+        shell: pwsh
+        run: |
+          $version = uv run python scripts/bump_version.py
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match __version__ $version"
+          }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build exe and installer
+        shell: cmd
+        run: call build.bat
+
+      - name: Check build output
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          foreach ($f in "dist/SwiftVirtualPrinter.exe", "dist/SwiftVirtualPrinter-Setup-$v.exe") {
+            if (-not (Test-Path $f)) { throw "Missing $f" }
+          }
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Swift Virtual Printer ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/SwiftVirtualPrinter.exe
+            dist/SwiftVirtualPrinter-Setup-*.exe
