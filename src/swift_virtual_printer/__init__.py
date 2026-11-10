@@ -1,7 +1,7 @@
 """Virtual ESC/POS network printer that renders jobs to PDF."""
 
 # Single source of truth for the version; bump with `python scripts/bump_version.py`.
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 APP_NAME = "Swift Virtual Printer"
 AUTHOR = "Bikitsos"
