@@ -1,0 +1,19 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# App output
+jobs/
+
+# Build output (PyInstaller, Inno Setup); virtual-printer.spec is tracked on purpose
+build/
+dist/
+src/swift_virtual_printer/_build_info.py
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/

@@ -1,0 +1,26 @@
+[project]
+name = "swift-virtual-printer"
+dynamic = ["version"]
+description = "Virtual ESC/POS network printer (raw TCP 9100) that renders print jobs to PDF"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6-Essentials>=6.6",
+    "segno>=1.6",
+    "python-barcode>=0.15",
+]
+
+[project.scripts]
+virtual-printer = "swift_virtual_printer.main:main"
+
+[project.gui-scripts]
+virtual-printer-gui = "swift_virtual_printer.gui:main"
+
+[dependency-groups]
+build = ["pyinstaller>=6.10"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/swift_virtual_printer/__init__.py"
