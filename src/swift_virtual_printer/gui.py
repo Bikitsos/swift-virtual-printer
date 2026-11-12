@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -37,6 +38,8 @@ from PySide6.QtWidgets import (
 
 from . import APP_NAME, COMPANY, CREDITS, __version__, build_info, default_receipts_dir
 from .forward import NETWORK, OFF, WINDOWS, ForwardTarget, list_windows_printers
+from .logo import LogoSettings, load_logo
+from .render import bitmap_to_qimage
 from .main import PAPER_SIZES
 from .server import PrintServer
 from .updater import Release, UpdateChecker, UpdateDownloader, can_self_update, is_newer, run_installer
@@ -143,7 +146,10 @@ class MainWindow(QMainWindow):
         settings_box = QGroupBox("Printer")
         settings_layout = QVBoxLayout(settings_box)
         settings_layout.addLayout(form)
-        settings_layout.addWidget(self._build_forward_box())
+        extras = QHBoxLayout()
+        extras.addWidget(self._build_forward_box(), 1)
+        extras.addWidget(self._build_logo_box(), 1)
+        settings_layout.addLayout(extras)
         settings_layout.addLayout(status_row)
 
         self.jobs_list = QListWidget()
@@ -220,6 +226,68 @@ class MainWindow(QMainWindow):
             port=self.forward_port.value(),
             printer=self.forward_printer.currentText().strip(),
         )
+
+    def _build_logo_box(self) -> QGroupBox:
+        self.logo_check = QCheckBox("Print logo at the top of every receipt")
+        self.logo_path = QLineEdit()
+        self.logo_path.setPlaceholderText("PNG or JPG")
+        browse = QPushButton("Browse...")
+        browse.clicked.connect(self._browse_logo)
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.logo_path)
+        path_row.addWidget(browse)
+        self.logo_width = QSpinBox()
+        self.logo_width.setRange(10, 100)
+        self.logo_width.setSuffix(" % of paper width")
+        self.logo_dither = QCheckBox("Dither (for photos / gradients)")
+        self.logo_preview = QLabel()
+        self.logo_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.logo_preview.setMinimumHeight(70)
+        self.logo_preview.setStyleSheet("background: white; border: 1px solid #ccc; color: #888;")
+
+        form = QFormLayout()
+        form.addRow(self.logo_check)
+        form.addRow("Image", path_row)
+        form.addRow("Width", self.logo_width)
+        form.addRow("", self.logo_dither)
+        form.addRow("Preview", self.logo_preview)
+        self.logo_check.toggled.connect(self._update_logo_preview)
+        self.logo_path.editingFinished.connect(self._update_logo_preview)
+        self.logo_width.valueChanged.connect(self._update_logo_preview)
+        self.logo_dither.toggled.connect(self._update_logo_preview)
+
+        box = QGroupBox("Logo")
+        box.setLayout(form)
+        return box
+
+    def _browse_logo(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choose logo", self.logo_path.text(), "Images (*.png *.jpg *.jpeg)")
+        if path:
+            self.logo_path.setText(path)
+            self.logo_check.setChecked(True)
+            self._update_logo_preview()
+
+    def _logo_settings(self) -> LogoSettings:
+        path = self.logo_path.text().strip() if self.logo_check.isChecked() else ""
+        return LogoSettings(path, self.logo_width.value(), self.logo_dither.isChecked())
+
+    def _update_logo_preview(self) -> None:
+        settings = LogoSettings(self.logo_path.text().strip(), self.logo_width.value(), self.logo_dither.isChecked())
+        if not settings.enabled:
+            self.logo_preview.setPixmap(QPixmap())
+            self.logo_preview.setText("No logo")
+            return
+        try:
+            bitmap = load_logo(settings, PAPER_SIZES[self.paper_combo.currentData()][1])
+        except ValueError as exc:
+            self.logo_preview.setPixmap(QPixmap())
+            self.logo_preview.setText(str(exc))
+            return
+        pixmap = QPixmap.fromImage(bitmap_to_qimage(bitmap))
+        self.logo_preview.setPixmap(
+            pixmap.scaled(260, 90, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        )
+        self.logo_preview.setEnabled(self.logo_check.isChecked())
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -372,6 +440,11 @@ class MainWindow(QMainWindow):
         self.forward_port.setValue(int(s.value("forward_port", 9100)))
         self.forward_printer.setCurrentText(str(s.value("forward_printer", "")))
         self._update_forward_fields()
+        self.logo_check.setChecked(s.value("logo_enabled", False, type=bool))
+        self.logo_path.setText(str(s.value("logo_path", "")))
+        self.logo_width.setValue(int(s.value("logo_width", 60)))
+        self.logo_dither.setChecked(s.value("logo_dither", False, type=bool))
+        self._update_logo_preview()
 
     def _save_settings(self) -> None:
         s = self.settings
@@ -384,6 +457,10 @@ class MainWindow(QMainWindow):
         s.setValue("forward_host", self.forward_host.text().strip())
         s.setValue("forward_port", self.forward_port.value())
         s.setValue("forward_printer", self.forward_printer.currentText().strip())
+        s.setValue("logo_enabled", self.logo_check.isChecked())
+        s.setValue("logo_path", self.logo_path.text().strip())
+        s.setValue("logo_width", self.logo_width.value())
+        s.setValue("logo_dither", self.logo_dither.isChecked())
 
     def _browse_output(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Receipts folder", self.output_edit.text())
@@ -412,6 +489,7 @@ class MainWindow(QMainWindow):
             paper_dots,
             self.idle_spin.value(),
             self._forward_target(),
+            self._logo_settings(),
             parent=self,
         )
         try:

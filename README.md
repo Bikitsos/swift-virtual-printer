@@ -13,6 +13,7 @@ Built with [PySide6](https://doc.qt.io/qtforpython/) and managed with [uv](https
 - Replies to real-time status requests (`DLE EOT`) so drivers that poll the printer don't stall
 - Saves every job three ways: the raw ESC/POS data (`.bin`), the PDF, and a JSON text version with one field per printed line
 - Optionally forwards each job's original bytes to a real printer (network raw TCP or an installed Windows printer)
+- Optional PNG/JPG logo printed at the top of every receipt, in the PDF and on the real printer
 
 ### Supported ESC/POS commands
 
@@ -85,6 +86,9 @@ uv run virtual-printer [options]
 | `--idle-timeout` | `10` | Seconds of inactivity that end a job |
 | `--forward-host` | | Also send each job to a real network printer (raw TCP) |
 | `--forward-port` | `9100` | Port for `--forward-host` |
+| `--logo` | | PNG/JPG printed at the top of every job |
+| `--logo-width` | `60` | Logo width as % of the paper width |
+| `--logo-dither` | off | Dither the logo (better for photos and gradients) |
 | `--forward-printer` | | Also send each job to an installed Windows printer (RAW); cannot be combined with `--forward-host` |
 
 Press `Ctrl+C` to stop.
@@ -134,6 +138,16 @@ In the JSON file, every printed line is a separate field. Images, barcodes, QR c
   }
 }
 ```
+
+## Logo
+
+In the **Logo** box, tick **Print logo at the top of every receipt**, choose a PNG or JPG, set the width (as a percentage of the paper width) and click **Apply & Restart**. The preview shows exactly what the printer will print in black and white.
+
+- The image is scaled to the chosen width. Transparent areas print white.
+- By default the image is converted to pure black and white: anything darker than 50% grey prints black. This works best for logos. Turn on **Dither** for photos or gradients.
+- The logo is inserted centred at the top of each job (after the job's own reset command), as standard ESC/POS raster graphics (`GS v 0`) that almost every receipt printer supports.
+- It appears in the PDF and JSON (as `[IMAGE WxH]`, with a `"logo"` field), and it is also sent to the [real printer](#forwarding-to-a-real-printer) when forwarding is on.
+- The `.bin` file still holds the bytes exactly as the POS sent them, without the logo.
 
 ## Forwarding to a real printer
 
@@ -228,6 +242,7 @@ src/swift_virtual_printer/
   server.py   TCP print server (QTcpServer)
   forward.py  forwarding to a real printer (raw TCP / Windows spooler)
   updater.py  update check, download and install from GitHub Releases
+  logo.py     PNG/JPG logo conversion and injection into jobs
   main.py     command-line entry point
   gui.py      system tray app
 scripts/

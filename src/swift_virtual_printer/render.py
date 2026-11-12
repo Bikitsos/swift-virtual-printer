@@ -40,7 +40,7 @@ MARGIN = 24
 BLOCK_PADDING = 8
 
 
-def _to_qimage(bitmap: Bitmap) -> QImage:
+def bitmap_to_qimage(bitmap: Bitmap) -> QImage:
     bpr = bitmap.bytes_per_row
     size = bpr * bitmap.height
     data = bytes(bitmap.data[:size]).ljust(size, b"\0")
@@ -166,7 +166,7 @@ class PdfRenderer:
             self._draw_line(painter, element, y)
         elif isinstance(element, ImageBlock):
             w, h = element.bitmap.size
-            painter.drawImage(QRectF(self._x(w, element.align), y, w, h), _to_qimage(element.bitmap))
+            painter.drawImage(QRectF(self._x(w, element.align), y, w, h), bitmap_to_qimage(element.bitmap))
         elif isinstance(element, QRBlock):
             self._draw_qr(painter, element, y)
         elif isinstance(element, BarcodeBlock):
@@ -180,7 +180,7 @@ class PdfRenderer:
             if isinstance(item, TextCell):
                 self._draw_cell(painter, x, baseline, item.char, item.style)
             elif isinstance(item, InlineImage):
-                painter.drawImage(QRectF(x, baseline - h, w, h), _to_qimage(item.bitmap))
+                painter.drawImage(QRectF(x, baseline - h, w, h), bitmap_to_qimage(item.bitmap))
             x += w
 
     def _draw_cell(self, painter: QPainter, x: float, baseline: float, char: str, style: Style) -> None:

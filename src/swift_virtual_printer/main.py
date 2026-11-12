@@ -26,6 +26,9 @@ def main() -> int:
     forward.add_argument("--forward-host", metavar="HOST", help="also send each job to a real network printer (raw TCP)")
     forward.add_argument("--forward-printer", metavar="NAME", help="also send each job to an installed Windows printer (RAW)")
     parser.add_argument("--forward-port", type=int, default=9100, help="port for --forward-host (default: 9100)")
+    parser.add_argument("--logo", metavar="IMAGE", help="PNG/JPG printed at the top of every job (PDF and real printer)")
+    parser.add_argument("--logo-width", type=int, default=60, metavar="PERCENT", help="logo width as %% of paper width (default: 60)")
+    parser.add_argument("--logo-dither", action="store_true", help="dither the logo (better for photos)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -37,6 +40,7 @@ def main() -> int:
     from PySide6.QtGui import QGuiApplication
 
     from .forward import NETWORK, WINDOWS, ForwardTarget
+    from .logo import LogoSettings
     from .server import PrintServer
 
     app = QGuiApplication(sys.argv[:1])
@@ -49,9 +53,10 @@ def main() -> int:
     else:
         target = ForwardTarget()
 
+    logo = LogoSettings(args.logo or "", max(10, min(100, args.logo_width)), args.logo_dither)
     paper_mm, paper_dots = PAPER_SIZES[args.paper]
     server = PrintServer(
-        args.host, args.port, args.output or default_receipts_dir(), paper_mm, paper_dots, args.idle_timeout, target
+        args.host, args.port, args.output or default_receipts_dir(), paper_mm, paper_dots, args.idle_timeout, target, logo
     )
     try:
         server.start()
