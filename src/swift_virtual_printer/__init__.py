@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 # Single source of truth for the version; bump with `python scripts/bump_version.py`.
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 APP_NAME = "Swift Virtual Printer"
 AUTHOR = "Bikitsos"
