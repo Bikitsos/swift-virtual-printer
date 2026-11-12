@@ -48,8 +48,12 @@ Name: "{app}\receipts\bin"; Flags: uninsneveruninstall
 Name: "{app}\receipts\pdf"; Flags: uninsneveruninstall
 Name: "{app}\receipts\json"; Flags: uninsneveruninstall
 
+[InstallDelete]
+; Drop files from the previous version (and the old one-file exe layout) before copying the new ones.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\SwiftVirtualPrinter\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 
 [Icons]
@@ -67,6 +71,9 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 ; Silent installs come from the in-app updater: restart the app as the original (non-elevated) user.
 Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: WizardSilent
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}\_internal"
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden; RunOnceId: "KillApp"

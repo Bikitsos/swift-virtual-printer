@@ -67,14 +67,16 @@ a = Analysis(
     excludes=["tkinter"],
 )
 pyz = PYZ(a.pure)
+# One-folder build: one-file exes unpack Python to %TEMP% on every start, which antivirus and
+# temp cleaners can break ("Failed to load Python DLL").
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
+    exclude_binaries=True,
     name="SwiftVirtualPrinter",
     console=False,
     icon=icon_path,
     version=str(version_path),
     upx=False,
 )
+coll = COLLECT(exe, a.binaries, a.datas, name="SwiftVirtualPrinter", upx=False)

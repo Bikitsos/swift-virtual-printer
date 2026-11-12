@@ -42,7 +42,7 @@ jobs:
         shell: pwsh
         run: |
           $v = uv run python scripts/bump_version.py
-          foreach ($f in "dist/SwiftVirtualPrinter.exe", "dist/SwiftVirtualPrinter-Setup-$v.exe") {
+          foreach ($f in "dist/SwiftVirtualPrinter/SwiftVirtualPrinter.exe", "dist/SwiftVirtualPrinter-$v-portable.zip", "dist/SwiftVirtualPrinter-Setup-$v.exe") {
             if (-not (Test-Path $f)) { throw "Missing $f" }
           }
 
@@ -53,5 +53,5 @@ jobs:
           name: Swift Virtual Printer ${{ github.ref_name }}
           generate_release_notes: true
           files: |
-            dist/SwiftVirtualPrinter.exe
+            dist/SwiftVirtualPrinter-*-portable.zip
             dist/SwiftVirtualPrinter-Setup-*.exe

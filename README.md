@@ -189,13 +189,15 @@ Each exe build also records its build date and git commit, and the **About** scr
 
 1. checks that the tag matches `__version__`
 2. builds the exe and the installer with `build.bat`
-3. publishes a GitHub release with auto-generated release notes, with `SwiftVirtualPrinter.exe` and `SwiftVirtualPrinter-Setup-X.Y.Z.exe` attached
+3. publishes a GitHub release with auto-generated release notes, with `SwiftVirtualPrinter-Setup-X.Y.Z.exe` and `SwiftVirtualPrinter-X.Y.Z-portable.zip` attached
 
 You can follow progress under the repository's **Actions** tab. A release can also be started by pushing any `vX.Y.Z` tag by hand, as long as it matches `__version__`.
 
 To test the build pipeline without publishing anything, run the workflow by hand: `gh workflow run release.yml` (or **Actions → Release → Run workflow**). A manual run builds the exe and installer but skips the version check and publishing.
 
-`build.bat` installs the build dependencies, closes any running copy of the app, and builds `dist\SwiftVirtualPrinter.exe`: a single standalone file (about 40 MB) with no console window. Python does not need to be installed on the target machine. The exe accepts `--minimized`.
+`build.bat` installs the build dependencies, closes any running copy of the app, and builds the app folder `dist\SwiftVirtualPrinter\` (`SwiftVirtualPrinter.exe` plus an `_internal` folder, no console window). It also builds a portable zip of that folder, `dist\SwiftVirtualPrinter-X.Y.Z-portable.zip`. Python does not need to be installed on the target machine. The exe accepts `--minimized`.
+
+The app is built as a folder rather than a single exe on purpose. A single-file exe unpacks Python into `%TEMP%\_MEI...` every time it starts, and antivirus scanners or temp cleaners can break that, causing *"Failed to load Python DLL"* errors. The folder build loads everything from the install folder and starts faster.
 
 If [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (`winget install JRSoftware.InnoSetup`), it also builds an installer, `dist\SwiftVirtualPrinter-Setup-<version>.exe`, from [installer.iss](installer.iss). The version number comes from `pyproject.toml`.
 

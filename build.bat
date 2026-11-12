@@ -1,5 +1,5 @@
 @echo off
-rem Builds dist\SwiftVirtualPrinter.exe and, if Inno Setup 6 is installed, the installer.
+rem Builds dist\SwiftVirtualPrinter\ (app folder), a portable zip and, if Inno Setup 6 is installed, the installer.
 rem Usage: build.bat [patch ^| minor ^| major ^| X.Y.Z]   (optional version bump before building)
 setlocal
 cd /d "%~dp0"
@@ -24,8 +24,15 @@ uv sync --group build || goto :fail
 echo === Stopping running instance (if any) ===
 taskkill /F /IM SwiftVirtualPrinter.exe >nul 2>nul
 
-echo === Building exe ===
+echo === Building app folder ===
 uv run --group build pyinstaller --noconfirm --clean virtual-printer.spec || goto :fail
+rem Leftover from older one-file builds.
+del /q dist\SwiftVirtualPrinter.exe 2>nul
+
+echo === Creating portable zip ===
+set "PORTABLE=dist\SwiftVirtualPrinter-%APP_VERSION%-portable.zip"
+del /q "%PORTABLE%" 2>nul
+tar -a -c -f "%PORTABLE%" -C dist SwiftVirtualPrinter || goto :fail
 
 set "ISCC="
 for %%p in (
@@ -37,7 +44,8 @@ if not defined ISCC for /f "delims=" %%i in ('where iscc 2^>nul') do if not defi
 
 if not defined ISCC (
     echo.
-    echo Built dist\SwiftVirtualPrinter.exe ^(version %APP_VERSION%^)
+    echo Built dist\SwiftVirtualPrinter\SwiftVirtualPrinter.exe ^(version %APP_VERSION%^)
+    echo Built %PORTABLE%
     echo Inno Setup 6 not found, skipping installer. Install it with:
     echo     winget install JRSoftware.InnoSetup
     exit /b 0
@@ -47,7 +55,8 @@ echo === Building installer (version %APP_VERSION%) ===
 "%ISCC%" /Qp /DMyAppVersion=%APP_VERSION% installer.iss || goto :fail
 
 echo.
-echo Built dist\SwiftVirtualPrinter.exe (version %APP_VERSION%)
+echo Built dist\SwiftVirtualPrinter\SwiftVirtualPrinter.exe (version %APP_VERSION%)
+echo Built %PORTABLE%
 echo Built dist\SwiftVirtualPrinter-Setup-%APP_VERSION%.exe
 exit /b 0
 
