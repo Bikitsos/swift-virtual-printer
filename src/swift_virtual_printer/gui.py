@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QSystemTrayIcon,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -45,6 +46,14 @@ from .server import PrintServer
 from .updater import Release, UpdateChecker, UpdateDownloader, can_self_update, is_newer, run_installer
 
 DEFAULT_OUTPUT = default_receipts_dir()
+LOGO_PREVIEW_WIDTH = 400
+
+
+def _hint(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet("color: #777;")
+    return label
 
 
 def make_icon(active: bool) -> QIcon:
@@ -84,7 +93,7 @@ class MainWindow(QMainWindow):
     def __init__(self, log_emitter: LogEmitter) -> None:
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} {__version__}")
-        self.resize(720, 560)
+        self.resize(1040, 640)
         self.settings = QSettings("SwiftVirtualPrinter", "VirtualPrinter")
         self.server: PrintServer | None = None
         self.last_job: Path | None = None
@@ -110,6 +119,74 @@ class MainWindow(QMainWindow):
     # -- UI construction ----------------------------------------------------
 
     def _build_ui(self) -> None:
+        tabs = QTabWidget()
+        tabs.addTab(self._build_printer_tab(), "Printer")
+        tabs.addTab(self._build_forward_tab(), "Forwarding")
+        tabs.addTab(self._build_logo_tab(), "Logo")
+        self.paper_combo.currentIndexChanged.connect(self._update_logo_preview)
+
+        self.toggle_button = QPushButton()
+        self.toggle_button.clicked.connect(self.toggle_server)
+        apply_button = QPushButton("Apply && Restart")
+        apply_button.setDefault(True)
+        apply_button.clicked.connect(self.apply_settings)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(self.toggle_button)
+        buttons.addWidget(apply_button)
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(tabs, 1)
+        left_layout.addLayout(buttons)
+
+        self.jobs_list = QListWidget()
+        self.jobs_list.itemDoubleClicked.connect(lambda item: self._open_path(item.data(Qt.ItemDataRole.UserRole)))
+        self.jobs_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.jobs_list.customContextMenuRequested.connect(self._show_job_menu)
+        open_folder = QPushButton("Open folder")
+        open_folder.clicked.connect(self.open_output_folder)
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.refresh_jobs)
+        jobs_buttons = QHBoxLayout()
+        jobs_buttons.addWidget(_hint("Double-click to open the PDF, right-click for the JSON."), 1)
+        jobs_buttons.addWidget(refresh)
+        jobs_buttons.addWidget(open_folder)
+        jobs_box = QGroupBox("Jobs")
+        jobs_layout = QVBoxLayout(jobs_box)
+        jobs_layout.addWidget(self.jobs_list)
+        jobs_layout.addLayout(jobs_buttons)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(1000)
+        log_box = QGroupBox("Log")
+        QVBoxLayout(log_box).addWidget(self.log_view)
+
+        right = QSplitter(Qt.Orientation.Vertical)
+        right.addWidget(jobs_box)
+        right.addWidget(log_box)
+        right.setSizes([360, 220])
+
+        main = QSplitter(Qt.Orientation.Horizontal)
+        main.addWidget(left)
+        main.addWidget(right)
+        main.setStretchFactor(0, 0)
+        main.setStretchFactor(1, 1)
+        main.setSizes([480, 560])
+
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.addWidget(main)
+        self.setCentralWidget(central)
+
+        self.status_dot = QLabel("\u25cf")
+        self.status_label = QLabel()
+        self.statusBar().addWidget(self.status_dot)
+        self.statusBar().addWidget(self.status_label, 1)
+
+    def _build_printer_tab(self) -> QWidget:
         self.host_edit = QLineEdit()
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1, 65535)
@@ -133,59 +210,14 @@ class MainWindow(QMainWindow):
         form.addRow("Receipts folder", output_row)
         form.addRow("Idle timeout", self.idle_spin)
 
-        self.status_label = QLabel()
-        self.toggle_button = QPushButton()
-        self.toggle_button.clicked.connect(self.toggle_server)
-        apply_button = QPushButton("Apply && Restart")
-        apply_button.clicked.connect(self.apply_settings)
-        status_row = QHBoxLayout()
-        status_row.addWidget(self.status_label, 1)
-        status_row.addWidget(apply_button)
-        status_row.addWidget(self.toggle_button)
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(_hint("POS software prints to this address and port. Each job is saved as .bin, .pdf and .json."))
+        layout.addLayout(form)
+        layout.addStretch(1)
+        return page
 
-        settings_box = QGroupBox("Printer")
-        settings_layout = QVBoxLayout(settings_box)
-        settings_layout.addLayout(form)
-        extras = QHBoxLayout()
-        extras.addWidget(self._build_forward_box(), 1)
-        extras.addWidget(self._build_logo_box(), 1)
-        settings_layout.addLayout(extras)
-        settings_layout.addLayout(status_row)
-
-        self.jobs_list = QListWidget()
-        self.jobs_list.itemDoubleClicked.connect(lambda item: self._open_path(item.data(Qt.ItemDataRole.UserRole)))
-        self.jobs_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.jobs_list.customContextMenuRequested.connect(self._show_job_menu)
-        open_folder = QPushButton("Open folder")
-        open_folder.clicked.connect(self.open_output_folder)
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.refresh_jobs)
-        jobs_buttons = QHBoxLayout()
-        jobs_buttons.addStretch(1)
-        jobs_buttons.addWidget(refresh)
-        jobs_buttons.addWidget(open_folder)
-        jobs_box = QGroupBox("Jobs (double-click to open PDF, right-click for JSON)")
-        jobs_layout = QVBoxLayout(jobs_box)
-        jobs_layout.addWidget(self.jobs_list)
-        jobs_layout.addLayout(jobs_buttons)
-
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(1000)
-        log_box = QGroupBox("Log")
-        QVBoxLayout(log_box).addWidget(self.log_view)
-
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(jobs_box)
-        splitter.addWidget(log_box)
-
-        central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.addWidget(settings_box)
-        layout.addWidget(splitter, 1)
-        self.setCentralWidget(central)
-
-    def _build_forward_box(self) -> QGroupBox:
+    def _build_forward_tab(self) -> QWidget:
         self.forward_mode = QComboBox()
         self.forward_mode.addItem("Off", OFF)
         self.forward_mode.addItem("Network printer (raw TCP)", NETWORK)
@@ -206,9 +238,12 @@ class MainWindow(QMainWindow):
         self.forward_form.addRow("Windows printer", self.forward_printer)
         self.forward_mode.currentIndexChanged.connect(self._update_forward_fields)
 
-        box = QGroupBox("Forward to real printer")
-        box.setLayout(self.forward_form)
-        return box
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(_hint("Also send every job, byte for byte (with the logo if enabled), to a real receipt printer."))
+        layout.addLayout(self.forward_form)
+        layout.addStretch(1)
+        return page
 
     def _update_forward_fields(self) -> None:
         mode = self.forward_mode.currentData()
@@ -227,7 +262,7 @@ class MainWindow(QMainWindow):
             printer=self.forward_printer.currentText().strip(),
         )
 
-    def _build_logo_box(self) -> QGroupBox:
+    def _build_logo_tab(self) -> QWidget:
         self.logo_check = QCheckBox("Print logo at the top of every receipt")
         self.logo_path = QLineEdit()
         self.logo_path.setPlaceholderText("PNG or JPG")
@@ -242,23 +277,27 @@ class MainWindow(QMainWindow):
         self.logo_dither = QCheckBox("Dither (for photos / gradients)")
         self.logo_preview = QLabel()
         self.logo_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.logo_preview.setMinimumHeight(70)
-        self.logo_preview.setStyleSheet("background: white; border: 1px solid #ccc; color: #888;")
+        self.logo_preview.setMinimumSize(LOGO_PREVIEW_WIDTH + 12, 180)
+        self.logo_preview.setStyleSheet("background: #e0e0e0; border: 1px solid #bbb; color: #666;")
+        self.logo_info = _hint("")
 
         form = QFormLayout()
         form.addRow(self.logo_check)
         form.addRow("Image", path_row)
         form.addRow("Width", self.logo_width)
         form.addRow("", self.logo_dither)
-        form.addRow("Preview", self.logo_preview)
         self.logo_check.toggled.connect(self._update_logo_preview)
         self.logo_path.editingFinished.connect(self._update_logo_preview)
         self.logo_width.valueChanged.connect(self._update_logo_preview)
         self.logo_dither.toggled.connect(self._update_logo_preview)
 
-        box = QGroupBox("Logo")
-        box.setLayout(form)
-        return box
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addLayout(form)
+        layout.addWidget(QLabel("Preview (as printed, on the paper width):"))
+        layout.addWidget(self.logo_preview, 1)
+        layout.addWidget(self.logo_info)
+        return page
 
     def _browse_logo(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Choose logo", self.logo_path.text(), "Images (*.png *.jpg *.jpeg)")
@@ -273,21 +312,36 @@ class MainWindow(QMainWindow):
 
     def _update_logo_preview(self) -> None:
         settings = LogoSettings(self.logo_path.text().strip(), self.logo_width.value(), self.logo_dither.isChecked())
+        self.logo_preview.setPixmap(QPixmap())
+        self.logo_info.setText("")
         if not settings.enabled:
-            self.logo_preview.setPixmap(QPixmap())
-            self.logo_preview.setText("No logo")
+            self.logo_preview.setText("No logo selected")
             return
+        paper = self.paper_combo.currentData()
+        paper_dots = PAPER_SIZES[paper][1]
         try:
-            bitmap = load_logo(settings, PAPER_SIZES[self.paper_combo.currentData()][1])
+            bitmap = load_logo(settings, paper_dots)
         except ValueError as exc:
-            self.logo_preview.setPixmap(QPixmap())
             self.logo_preview.setText(str(exc))
             return
-        pixmap = QPixmap.fromImage(bitmap_to_qimage(bitmap))
+
+        # Draw the logo on a strip of "paper" so its size relative to the receipt is visible.
+        margin = 16
+        paper_image = QPixmap(paper_dots, bitmap.height + 2 * margin)
+        paper_image.fill(Qt.GlobalColor.white)
+        painter = QPainter(paper_image)
+        painter.drawImage((paper_dots - bitmap.width) // 2, margin, bitmap_to_qimage(bitmap))
+        painter.end()
         self.logo_preview.setPixmap(
-            pixmap.scaled(260, 90, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            paper_image.scaled(
+                LOGO_PREVIEW_WIDTH,
+                max(self.logo_preview.height() - 12, 120),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
         )
-        self.logo_preview.setEnabled(self.logo_check.isChecked())
+        state = "" if self.logo_check.isChecked() else " - not enabled"
+        self.logo_info.setText(f"{bitmap.width} \u00d7 {bitmap.height} dots on {paper} mm paper{state}")
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -525,6 +579,7 @@ class MainWindow(QMainWindow):
         else:
             text = f"Stopped: {error}" if error else "Stopped"
         self.status_label.setText(text)
+        self.status_dot.setStyleSheet(f"font-size: 14pt; color: {'#2e7d32' if running else '#c62828' if error else '#9e9e9e'};")
         self.toggle_button.setText("Stop" if running else "Start")
         self.tray_toggle.setText("Stop printer" if running else "Start printer")
         self.tray.setIcon(self._icon_on if running else self._icon_off)
