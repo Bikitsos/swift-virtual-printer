@@ -6,14 +6,17 @@ import argparse
 import logging
 import signal
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -29,6 +32,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressDialog,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QSystemTrayIcon,
@@ -38,9 +42,10 @@ from PySide6.QtWidgets import (
 )
 
 from . import APP_NAME, COMPANY, CREDITS, __version__, build_info, default_receipts_dir
-from .forward import NETWORK, OFF, WINDOWS, ForwardTarget, list_windows_printers
+from .escpos import EscPosParser
+from .forward import NETWORK, OFF, WINDOWS, ForwardTarget, forward_async, list_windows_printers
 from .logo import LogoSettings, load_logo
-from .render import bitmap_to_qimage
+from .render import PdfRenderer, bitmap_to_qimage
 from .main import PAPER_SIZES
 from .server import PrintServer
 from .updater import Release, UpdateChecker, UpdateDownloader, can_self_update, is_newer, run_installer
@@ -80,6 +85,123 @@ class LogEmitter(QObject):
     message = Signal(str)
 
 
+@dataclass(frozen=True)
+class Job:
+    """Files of one print job inside the receipts folder."""
+
+    root: Path
+    stem: str
+
+    def _file(self, folder: str, ext: str) -> Path:
+        return self.root / folder / f"{self.stem}.{ext}"
+
+    @property
+    def bin(self) -> Path:
+        return self._file("bin", "bin")
+
+    @property
+    def pdf(self) -> Path:
+        return self._file("pdf", "pdf")
+
+    @property
+    def json(self) -> Path:
+        return self._file("json", "json")
+
+    @property
+    def final_bin(self) -> Path:
+        return self._file("final", "bin")
+
+    @property
+    def final_pdf(self) -> Path:
+        return self._file("final", "pdf")
+
+    @property
+    def best_pdf(self) -> Path:
+        return self.final_pdf if self.final_pdf.exists() else self.pdf
+
+    @property
+    def print_bytes_path(self) -> Path | None:
+        """Final bytes (with logo) if saved, otherwise the bytes as received."""
+        return next((p for p in (self.final_bin, self.bin) if p.exists()), None)
+
+
+class PreviewDialog(QDialog):
+    ZOOMS = (50, 75, 100, 125, 150)
+
+    def __init__(self, window: MainWindow, job: Job) -> None:
+        super().__init__(window)
+        self._window = window
+        self.job = job
+        self.setWindowTitle(f"Preview - {job.stem}")
+        self.resize(560, 760)
+
+        self.source = QComboBox()
+        if job.final_bin.exists():
+            self.source.addItem("Final (as printed, with logo)", job.final_bin)
+        if job.bin.exists():
+            self.source.addItem("As received from the POS", job.bin)
+        self.zoom = QComboBox()
+        for zoom in self.ZOOMS:
+            self.zoom.addItem(f"{zoom}%", zoom)
+        self.zoom.setCurrentIndex(self.ZOOMS.index(75))
+        self.source.currentIndexChanged.connect(self._render)
+        self.zoom.currentIndexChanged.connect(self._show_image)
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Show"))
+        top.addWidget(self.source, 1)
+        top.addWidget(QLabel("Zoom"))
+        top.addWidget(self.zoom)
+
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        scroll.setStyleSheet("QScrollArea { background: #9e9e9e; } QLabel { background: #9e9e9e; }")
+        scroll.setWidget(self.image_label)
+
+        buttons = QDialogButtonBox()
+        reprint = buttons.addButton("Reprint", QDialogButtonBox.ButtonRole.ActionRole)
+        reprint.setEnabled(job.print_bytes_path is not None)
+        target = window.active_forward_target()
+        reprint.setToolTip(f"Send to {target}" if target.enabled else "Set up a real printer on the Forwarding tab first")
+        reprint.clicked.connect(lambda: window.reprint_job(job))
+        open_pdf = buttons.addButton("Open PDF", QDialogButtonBox.ButtonRole.ActionRole)
+        open_pdf.setEnabled(job.best_pdf.exists())
+        open_pdf.clicked.connect(lambda: window._open_path(job.best_pdf))
+        buttons.addButton(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addWidget(scroll, 1)
+        layout.addWidget(buttons)
+
+        self._image: QImage | None = None
+        self._render()
+
+    def _render(self) -> None:
+        path = self.source.currentData()
+        self._image = None
+        if path is None:
+            self.image_label.setText("No print data saved for this job.")
+            return
+        paper_mm, paper_dots = PAPER_SIZES[self._window.paper_combo.currentData()]
+        elements = EscPosParser(paper_dots).parse(Path(path).read_bytes())
+        self._image = PdfRenderer(paper_mm, paper_dots).render_image(elements)
+        if self._image is None:
+            self.image_label.setText("Nothing printable in this job.")
+            return
+        self._show_image()
+
+    def _show_image(self) -> None:
+        if self._image is None:
+            return
+        width = round(self._image.width() * self.zoom.currentData() / 100)
+        pixmap = QPixmap.fromImage(self._image).scaledToWidth(width, Qt.TransformationMode.SmoothTransformation)
+        self.image_label.setPixmap(pixmap)
+
+
 class QtLogHandler(logging.Handler):
     def __init__(self, emitter: LogEmitter) -> None:
         super().__init__()
@@ -96,9 +218,9 @@ class MainWindow(QMainWindow):
         self.resize(1040, 640)
         self.settings = QSettings("SwiftVirtualPrinter", "VirtualPrinter")
         self.server: PrintServer | None = None
-        self.last_job: Path | None = None
+        self.last_job: str | None = None
         self._tray_hint_shown = False
-        self._tray_click = self.open_last_job
+        self._tray_click = self.preview_last_job
         self._update_silent = False
         self._icon_on, self._icon_off = make_icon(True), make_icon(False)
         self.setWindowIcon(self._icon_on)
@@ -142,7 +264,9 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(buttons)
 
         self.jobs_list = QListWidget()
-        self.jobs_list.itemDoubleClicked.connect(lambda item: self._open_path(item.data(Qt.ItemDataRole.UserRole)))
+        self.jobs_list.itemDoubleClicked.connect(
+            lambda item: self.preview_job(self._job(item.data(Qt.ItemDataRole.UserRole)))
+        )
         self.jobs_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.jobs_list.customContextMenuRequested.connect(self._show_job_menu)
         open_folder = QPushButton("Open folder")
@@ -150,7 +274,7 @@ class MainWindow(QMainWindow):
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(self.refresh_jobs)
         jobs_buttons = QHBoxLayout()
-        jobs_buttons.addWidget(_hint("Double-click to open the PDF, right-click for the JSON."), 1)
+        jobs_buttons.addWidget(_hint("Double-click to preview, right-click to reprint or open files."), 1)
         jobs_buttons.addWidget(refresh)
         jobs_buttons.addWidget(open_folder)
         jobs_box = QGroupBox("Jobs")
@@ -467,7 +591,7 @@ class MainWindow(QMainWindow):
         self.tray = QSystemTrayIcon(self._icon_off, self)
         menu = QMenu(self)
         menu.addAction("Show window", self.show_window)
-        menu.addAction("Open last job", self.open_last_job)
+        menu.addAction("Preview last job", self.preview_last_job)
         menu.addAction("Open jobs folder", self.open_output_folder)
         menu.addSeparator()
         self.tray_toggle: QAction = menu.addAction("Stop printer", self.toggle_server)
@@ -587,10 +711,13 @@ class MainWindow(QMainWindow):
 
     # -- jobs ---------------------------------------------------------------
 
-    def _add_job_item(self, path: Path, top: bool = False) -> None:
-        item = QListWidgetItem(path.name)
-        item.setData(Qt.ItemDataRole.UserRole, str(path))
-        item.setToolTip(str(path))
+    def _job(self, stem: str) -> Job:
+        return Job(self.output_dir, stem)
+
+    def _add_job_item(self, stem: str, top: bool = False) -> None:
+        item = QListWidgetItem(stem)
+        item.setData(Qt.ItemDataRole.UserRole, stem)
+        item.setToolTip(str(self._job(stem).best_pdf))
         if top:
             self.jobs_list.insertItem(0, item)
         else:
@@ -598,20 +725,23 @@ class MainWindow(QMainWindow):
 
     def refresh_jobs(self) -> None:
         self.jobs_list.clear()
-        pdf_dir = self.output_dir / "pdf"
-        if not pdf_dir.is_dir():
-            return
-        pdfs = sorted(pdf_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for path in pdfs[:500]:
-            self._add_job_item(path)
-        if pdfs and self.last_job is None:
-            self.last_job = pdfs[0]
+        pdfs: dict[str, float] = {}
+        for folder in ("pdf", "final"):
+            directory = self.output_dir / folder
+            if directory.is_dir():
+                for path in directory.glob("*.pdf"):
+                    pdfs[path.stem] = max(pdfs.get(path.stem, 0.0), path.stat().st_mtime)
+        stems = sorted(pdfs, key=pdfs.get, reverse=True)
+        for stem in stems[:500]:
+            self._add_job_item(stem)
+        if stems and self.last_job is None:
+            self.last_job = stems[0]
 
     def _on_job_saved(self, path: Path) -> None:
-        self.last_job = path
-        self._tray_click = self.open_last_job
-        self._add_job_item(path, top=True)
-        self.tray.showMessage("Print job received", f"{path.name}\nClick to open.", QSystemTrayIcon.MessageIcon.Information, 4000)
+        self.last_job = path.stem
+        self._tray_click = self.preview_last_job
+        self._add_job_item(path.stem, top=True)
+        self.tray.showMessage("Print job received", f"{path.stem}\nClick to preview.", QSystemTrayIcon.MessageIcon.Information, 4000)
 
     def _open_path(self, path: str | Path) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
@@ -620,17 +750,43 @@ class MainWindow(QMainWindow):
         item = self.jobs_list.itemAt(pos)
         if not item:
             return
-        pdf = Path(item.data(Qt.ItemDataRole.UserRole))
-        json_file = self.output_dir / "json" / f"{pdf.stem}.json"
+        job = self._job(item.data(Qt.ItemDataRole.UserRole))
         menu = QMenu(self)
-        menu.addAction("Open PDF", lambda: self._open_path(pdf))
-        menu.addAction("Open JSON", lambda: self._open_path(json_file)).setEnabled(json_file.exists())
-        menu.addAction("Copy JSON path", lambda: QApplication.clipboard().setText(str(json_file))).setEnabled(json_file.exists())
+        menu.addAction("Preview", lambda: self.preview_job(job))
+        menu.addAction("Reprint", lambda: self.reprint_job(job)).setEnabled(job.print_bytes_path is not None)
+        menu.addSeparator()
+        menu.addAction("Open final PDF", lambda: self._open_path(job.final_pdf)).setEnabled(job.final_pdf.exists())
+        menu.addAction("Open PDF as received", lambda: self._open_path(job.pdf)).setEnabled(job.pdf.exists())
+        menu.addAction("Open JSON", lambda: self._open_path(job.json)).setEnabled(job.json.exists())
+        menu.addAction("Copy JSON path", lambda: QApplication.clipboard().setText(str(job.json))).setEnabled(job.json.exists())
+        menu.addSeparator()
+        menu.addAction("Show in folder", lambda: self._open_path(job.best_pdf.parent))
         menu.exec(self.jobs_list.viewport().mapToGlobal(pos))
 
-    def open_last_job(self) -> None:
-        if self.last_job and self.last_job.exists():
-            self._open_path(self.last_job)
+    def preview_job(self, job: Job) -> None:
+        PreviewDialog(self, job).exec()
+
+    def preview_last_job(self) -> None:
+        if self.last_job:
+            self.show_window()
+            self.preview_job(self._job(self.last_job))
+
+    def active_forward_target(self) -> ForwardTarget:
+        return self.server.forward_target if self.server else self._forward_target()
+
+    def reprint_job(self, job: Job) -> None:
+        target = self.active_forward_target()
+        if not target.enabled:
+            QMessageBox.information(
+                self, "Reprint", "No real printer is set up.\n\nChoose one on the Forwarding tab and click Apply && Restart."
+            )
+            return
+        path = job.print_bytes_path
+        if path is None:
+            QMessageBox.warning(self, "Reprint", f"No print data saved for {job.stem}.")
+            return
+        forward_async(target, path.read_bytes(), f"{job.stem} (reprint)")
+        self.statusBar().showMessage(f"Reprint of {job.stem} sent to {target}", 6000)
 
     def open_output_folder(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)

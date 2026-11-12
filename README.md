@@ -11,7 +11,8 @@ Built with [PySide6](https://doc.qt.io/qtforpython/) and managed with [uv](https
 - A new PDF page at each paper cut, sized to fit its content
 - System tray app with a settings window, job list, log view and new-job notifications
 - Replies to real-time status requests (`DLE EOT`) so drivers that poll the printer don't stall
-- Saves every job three ways: the raw ESC/POS data (`.bin`), the PDF, and a JSON text version with one field per printed line
+- Saves every job as received (raw `.bin` data and PDF), as finalized (exactly what goes to the real printer, logo included), and as a JSON text version with one field per printed line
+- Preview any job in the app and reprint it to the real printer
 - Optionally forwards each job's original bytes to a real printer (network raw TCP or an installed Windows printer)
 - Optional PNG/JPG logo printed at the top of every receipt, in the PDF and on the real printer
 
@@ -57,7 +58,9 @@ uv run virtual-printer-gui --minimized  # start hidden in the tray
 - Closing the window hides it to the tray. Use **Quit** to exit.
 - Settings are remembered between runs. Click **Apply & Restart** after changing them.
 - Receipts are saved in the `receipts` folder next to the app (see [Saved receipts](#saved-receipts)).
-- Right-click a job in the list to open its JSON or copy the JSON file's path.
+- **Double-click** a job to open its **preview**. You can switch between *Final (as printed, with logo)* and *As received from the POS*, zoom in or out, **Reprint** it, or open the PDF.
+- **Right-click** a job for: Preview, Reprint, Open final PDF, Open PDF as received, Open JSON, Copy JSON path, Show in folder.
+- **Reprint** sends the job's final bytes (with the logo it was printed with) to the printer set on the **Forwarding** tab. Older jobs without a final copy are reprinted as received.
 
 ### Updates
 
@@ -81,7 +84,7 @@ uv run virtual-printer [options]
 | --- | --- | --- |
 | `--host` | `0.0.0.0` | Address to bind |
 | `--port` | `9100` | TCP port |
-| `--output` | `<app>/receipts` | Receipts folder (gets `bin/`, `pdf/` and `json/` subfolders) |
+| `--output` | `<app>/receipts` | Receipts folder (gets `bin/`, `pdf/`, `json/` and `final/` subfolders) |
 | `--paper` | `80` | Paper width in mm (`58` or `80`) |
 | `--idle-timeout` | `10` | Seconds of inactivity that end a job |
 | `--forward-host` | | Also send each job to a real network printer (raw TCP) |
@@ -105,13 +108,15 @@ This sends a sample receipt with styled text, an image, a CODE128 barcode, a QR 
 
 ## Saved receipts
 
-Each job is saved under the same name (`job_YYYYMMDD_HHMMSS_NNNN`) in three subfolders:
+Each job is saved under the same name (`job_YYYYMMDD_HHMMSS_NNNN`) in four subfolders:
 
 ```
 receipts/
-  bin/   raw ESC/POS bytes exactly as received (can be replayed or forwarded)
-  pdf/   rendered receipt, one page per paper cut
-  json/  text version of the receipt
+  bin/    raw ESC/POS bytes exactly as received from the POS
+  pdf/    PDF of the receipt as received
+  final/  finalized receipt as sent to the real printer (logo and all):
+          .pdf to view/share, .bin used for reprints
+  json/   text version of the final receipt
 ```
 
 The `receipts` folder sits next to `SwiftVirtualPrinter.exe` (or in the project root when running with `uv run`). The installer makes it writable for normal users and keeps it on uninstall. If the folder can't be written to, the app uses `%LOCALAPPDATA%\Swift Virtual Printer\receipts` instead. You can choose a different folder in the window or with `--output`.
@@ -147,7 +152,7 @@ In the **Logo** box, tick **Print logo at the top of every receipt**, choose a P
 - By default the image is converted to pure black and white: anything darker than 50% grey prints black. This works best for logos. Turn on **Dither** for photos or gradients.
 - The logo is inserted centred at the top of each job (after the job's own reset command), as standard ESC/POS raster graphics (`GS v 0`) that almost every receipt printer supports.
 - It appears in the PDF and JSON (as `[IMAGE WxH]`, with a `"logo"` field), and it is also sent to the [real printer](#forwarding-to-a-real-printer) when forwarding is on.
-- The `.bin` file still holds the bytes exactly as the POS sent them, without the logo.
+- The `bin/` and `pdf/` copies hold the job exactly as the POS sent it, without the logo. The `final/` copies include it.
 
 ## Forwarding to a real printer
 

@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 MAX_JOB_BYTES = 64 * 1024 * 1024
 DLE_EOT = b"\x10\x04"
 STATUS_ONLINE = b"\x12"
-SUBFOLDERS = ("bin", "pdf", "json")
+SUBFOLDERS = ("bin", "pdf", "json", "final")
 
 
 class PrintServer(QObject):
@@ -145,13 +145,17 @@ class PrintServer(QObject):
         bin_path = self.output_dir / "bin" / f"{stem}.bin"
         pdf_path = self.output_dir / "pdf" / f"{stem}.pdf"
         json_path = self.output_dir / "json" / f"{stem}.json"
+        final_bin = self.output_dir / "final" / f"{stem}.bin"
+        final_pdf = self.output_dir / "final" / f"{stem}.pdf"
         bin_path.write_bytes(data)
-        # The .bin keeps the bytes as received; the printer, PDF and JSON get the logo version.
+        # bin/ and pdf/ keep the job as received; final/ holds exactly what goes to the real printer.
         printed = inject(data, self._logo_bytes) if self._logo_bytes else data
+        final_bin.write_bytes(printed)
         if self.forward_target.enabled:
             forward_async(self.forward_target, printed, stem)
 
         try:
+            received_elements = EscPosParser(self.paper_dots).parse(data)
             elements = EscPosParser(self.paper_dots).parse(printed)
             lines = elements_to_lines(elements)
             record = {
@@ -161,16 +165,22 @@ class PrintServer(QObject):
                 "size_bytes": len(data),
                 "paper_mm": self.paper_mm,
                 "app": f"{APP_NAME} {__version__}",
-                "files": {"bin": f"bin/{bin_path.name}", "pdf": f"pdf/{pdf_path.name}"},
+                "files": {
+                    "bin": f"bin/{bin_path.name}",
+                    "pdf": f"pdf/{pdf_path.name}",
+                    "final_bin": f"final/{final_bin.name}",
+                    "final_pdf": f"final/{final_pdf.name}",
+                },
                 "logo": Path(self.logo.path).name if self._logo_bytes else None,
                 "line_count": len(lines),
                 "lines": {f"line_{i:03d}": text for i, text in enumerate(lines, 1)},
             }
             json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
 
-            if self.renderer.render(elements, pdf_path):
+            self.renderer.render(received_elements, pdf_path)
+            if self.renderer.render(elements, final_pdf):
                 log.info("Job from %s (%d bytes) -> %s", peer, len(data), stem)
-                self.job_saved.emit(pdf_path)
+                self.job_saved.emit(final_pdf)
             else:
                 log.info("Job from %s (%d bytes) had nothing printable", peer, len(data))
         except Exception:

@@ -17,6 +17,7 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPdfWriter,
+    QPen,
 )
 
 from .escpos import (
@@ -95,12 +96,12 @@ class PdfRenderer:
         writer.setResolution(DPI)
         writer.setCreator("swift-virtual-printer")
         writer.setTitle(path.stem)
-        self._writer = writer
+        self._use_device(writer)
 
         painter = QPainter()
         try:
             for index, page in enumerate(pages):
-                height = max(self.page_width, 2 * MARGIN + sum(self._height(e) for e in page))
+                height = max(self.page_width, self._page_height(page))
                 page_size = QPageSize(
                     QSizeF(self.paper_mm, height * 25.4 / DPI),
                     QPageSize.Unit.Millimeter,
@@ -115,15 +116,52 @@ class PdfRenderer:
                         raise RuntimeError(f"Cannot write PDF: {path}")
                 else:
                     writer.newPage()
-
-                y = float(MARGIN)
-                for element in page:
-                    self._draw(painter, element, y)
-                    y += self._height(element)
+                self._paint_page(painter, page, 0)
         finally:
             if painter.isActive():
                 painter.end()
         return True
+
+    def render_image(self, elements: list[Element]) -> QImage | None:
+        """Render all pages stacked into one image (1 pixel = 1 printer dot), with cut marks between pages."""
+        pages = _split_pages(elements)
+        if not pages:
+            return None
+        heights = [self._page_height(page) for page in pages]
+        gap = 32
+        image = QImage(self.page_width, int(sum(heights) + gap * (len(pages) - 1)), QImage.Format.Format_RGB32)
+        image.fill(Qt.GlobalColor.white)
+        dots_per_meter = round(DPI / 0.0254)
+        image.setDotsPerMeterX(dots_per_meter)
+        image.setDotsPerMeterY(dots_per_meter)
+        self._use_device(image)
+
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        y = 0.0
+        for index, page in enumerate(pages):
+            if index:
+                painter.fillRect(QRectF(0, y, self.page_width, gap), Qt.GlobalColor.lightGray)
+                painter.setPen(QPen(Qt.GlobalColor.darkGray, 2, Qt.PenStyle.DashLine))
+                painter.drawLine(QPointF(0, y + gap / 2), QPointF(self.page_width, y + gap / 2))
+                y += gap
+            self._paint_page(painter, page, y)
+            y += heights[index]
+        painter.end()
+        return image
+
+    def _use_device(self, device) -> None:
+        self._device = device
+        self._fonts.clear()
+
+    def _page_height(self, page: list[Element]) -> float:
+        return 2 * MARGIN + sum(self._height(e) for e in page)
+
+    def _paint_page(self, painter: QPainter, page: list[Element], top: float) -> None:
+        y = top + MARGIN
+        for element in page:
+            self._draw(painter, element, y)
+            y += self._height(element)
 
     # -- metrics ------------------------------------------------------------
 
@@ -135,7 +173,7 @@ class PdfRenderer:
             qfont.setStyleHint(QFont.StyleHint.TypeWriter)
             qfont.setPixelSize(round(cell_h * 0.9))
             qfont.setBold(bold)
-            metrics = QFontMetricsF(qfont, self._writer)
+            metrics = QFontMetricsF(qfont, self._device)
             scale_x = cell_w / metrics.horizontalAdvance("M")
             self._fonts[key] = (qfont, scale_x, metrics.descent())
         return self._fonts[key]
