@@ -41,6 +41,13 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "startup"; Description: "Start automatically with Windows (in the system tray)"; GroupDescription: "Startup:"
 Name: "firewall"; Description: "Allow other computers to print to port 9100 (Windows Firewall rule)"; GroupDescription: "Network:"; Flags: unchecked; Check: IsAdminInstallMode
 
+[Dirs]
+; Receipts live next to the exe; let normal users write there even under Program Files. Kept on uninstall.
+Name: "{app}\receipts"; Permissions: users-modify; Flags: uninsneveruninstall
+Name: "{app}\receipts\bin"; Flags: uninsneveruninstall
+Name: "{app}\receipts\pdf"; Flags: uninsneveruninstall
+Name: "{app}\receipts\json"; Flags: uninsneveruninstall
+
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme

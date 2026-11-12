@@ -9,7 +9,7 @@ import signal
 import sys
 from pathlib import Path
 
-from . import APP_NAME, __version__
+from . import APP_NAME, __version__, default_receipts_dir
 
 PAPER_SIZES = {"80": (80.0, 576), "58": (58.0, 384)}
 
@@ -18,10 +18,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Virtual ESC/POS printer that saves jobs as PDF.")
     parser.add_argument("--host", default="0.0.0.0", help="address to bind (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=9100, help="TCP port (default: 9100)")
-    parser.add_argument("--output", type=Path, default=Path("jobs"), help="directory for PDFs (default: ./jobs)")
+    parser.add_argument("--output", type=Path, help="receipts folder; gets bin/, pdf/ and json/ subfolders (default: <app>/receipts)")
     parser.add_argument("--paper", choices=PAPER_SIZES, default="80", help="paper width in mm (default: 80)")
     parser.add_argument("--idle-timeout", type=float, default=10.0, help="seconds of inactivity that end a job")
-    parser.add_argument("--save-raw", action="store_true", help="also save the raw ESC/POS bytes (.bin)")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     forward = parser.add_mutually_exclusive_group()
     forward.add_argument("--forward-host", metavar="HOST", help="also send each job to a real network printer (raw TCP)")
@@ -52,7 +51,7 @@ def main() -> int:
 
     paper_mm, paper_dots = PAPER_SIZES[args.paper]
     server = PrintServer(
-        args.host, args.port, args.output, paper_mm, paper_dots, args.idle_timeout, args.save_raw, target
+        args.host, args.port, args.output or default_receipts_dir(), paper_mm, paper_dots, args.idle_timeout, target
     )
     try:
         server.start()

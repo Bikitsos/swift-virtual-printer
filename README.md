@@ -11,7 +11,7 @@ Built with [PySide6](https://doc.qt.io/qtforpython/) and managed with [uv](https
 - A new PDF page at each paper cut, sized to fit its content
 - System tray app with a settings window, job list, log view and new-job notifications
 - Replies to real-time status requests (`DLE EOT`) so drivers that poll the printer don't stall
-- Can also save the raw ESC/POS data (`.bin`) for debugging
+- Saves every job three ways: the raw ESC/POS data (`.bin`), the PDF, and a JSON text version with one field per printed line
 - Optionally forwards each job's original bytes to a real printer (network raw TCP or an installed Windows printer)
 
 ### Supported ESC/POS commands
@@ -55,7 +55,8 @@ uv run virtual-printer-gui --minimized  # start hidden in the tray
 - **Right-click menu:** Show window, Open last job, Open jobs folder, Start/Stop printer, Quit.
 - Closing the window hides it to the tray. Use **Quit** to exit.
 - Settings are remembered between runs. Click **Apply & Restart** after changing them.
-- PDFs are saved to `Documents\Virtual Printer` by default.
+- Receipts are saved in the `receipts` folder next to the app (see [Saved receipts](#saved-receipts)).
+- Right-click a job in the list to open its JSON or copy the JSON file's path.
 
 ### Command line
 
@@ -67,10 +68,9 @@ uv run virtual-printer [options]
 | --- | --- | --- |
 | `--host` | `0.0.0.0` | Address to bind |
 | `--port` | `9100` | TCP port |
-| `--output` | `./jobs` | Folder for PDFs |
+| `--output` | `<app>/receipts` | Receipts folder (gets `bin/`, `pdf/` and `json/` subfolders) |
 | `--paper` | `80` | Paper width in mm (`58` or `80`) |
 | `--idle-timeout` | `10` | Seconds of inactivity that end a job |
-| `--save-raw` | off | Also save the raw ESC/POS data as `.bin` |
 | `--forward-host` | | Also send each job to a real network printer (raw TCP) |
 | `--forward-port` | `9100` | Port for `--forward-host` |
 | `--forward-printer` | | Also send each job to an installed Windows printer (RAW); cannot be combined with `--forward-host` |
@@ -86,6 +86,42 @@ uv run python scripts/send_test.py [host] [port]
 ```
 
 This sends a sample receipt with styled text, an image, a CODE128 barcode, a QR code and a cut.
+
+## Saved receipts
+
+Each job is saved under the same name (`job_YYYYMMDD_HHMMSS_NNNN`) in three subfolders:
+
+```
+receipts/
+  bin/   raw ESC/POS bytes exactly as received (can be replayed or forwarded)
+  pdf/   rendered receipt, one page per paper cut
+  json/  text version of the receipt
+```
+
+The `receipts` folder sits next to `SwiftVirtualPrinter.exe` (or in the project root when running with `uv run`). The installer makes it writable for normal users and keeps it on uninstall. If the folder can't be written to, the app uses `%LOCALAPPDATA%\Swift Virtual Printer\receipts` instead. You can choose a different folder in the window or with `--output`.
+
+In the JSON file, every printed line is a separate field. Images, barcodes, QR codes and cuts appear as markers:
+
+```json
+{
+  "job": "job_20261112_095239_0001",
+  "received": "2026-11-12T09:52:39",
+  "client": "127.0.0.1:51739",
+  "size_bytes": 1230,
+  "paper_mm": 80.0,
+  "app": "Swift Virtual Printer 0.1.1",
+  "files": { "bin": "bin/job_20261112_095239_0001.bin", "pdf": "pdf/job_20261112_095239_0001.pdf" },
+  "line_count": 19,
+  "lines": {
+    "line_001": "SWIFT STORE",
+    "line_002": "123 Main Street",
+    "line_013": "[IMAGE 128x48]",
+    "line_014": "[BARCODE code128] 1234567890",
+    "line_015": "[QR] https://example.com/receipt/42",
+    "line_019": "[CUT]"
+  }
+}
+```
 
 ## Forwarding to a real printer
 

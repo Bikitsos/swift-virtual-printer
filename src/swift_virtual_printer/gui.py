@@ -12,7 +12,6 @@ from PySide6.QtCore import QObject, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -35,12 +34,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import APP_NAME, COMPANY, CREDITS, __version__, build_info
+from . import APP_NAME, COMPANY, CREDITS, __version__, build_info, default_receipts_dir
 from .forward import NETWORK, OFF, WINDOWS, ForwardTarget, list_windows_printers
 from .main import PAPER_SIZES
 from .server import PrintServer
 
-DEFAULT_OUTPUT = Path.home() / "Documents" / "Virtual Printer"
+DEFAULT_OUTPUT = default_receipts_dir()
 
 
 def make_icon(active: bool) -> QIcon:
@@ -115,15 +114,13 @@ class MainWindow(QMainWindow):
         self.idle_spin = QDoubleSpinBox()
         self.idle_spin.setRange(1, 600)
         self.idle_spin.setSuffix(" s")
-        self.raw_check = QCheckBox("Also save raw ESC/POS data (.bin)")
 
         form = QFormLayout()
         form.addRow("Listen address", self.host_edit)
         form.addRow("Port", self.port_spin)
         form.addRow("Paper width", self.paper_combo)
-        form.addRow("Output folder", output_row)
+        form.addRow("Receipts folder", output_row)
         form.addRow("Idle timeout", self.idle_spin)
-        form.addRow("", self.raw_check)
 
         self.status_label = QLabel()
         self.toggle_button = QPushButton()
@@ -143,6 +140,8 @@ class MainWindow(QMainWindow):
 
         self.jobs_list = QListWidget()
         self.jobs_list.itemDoubleClicked.connect(lambda item: self._open_path(item.data(Qt.ItemDataRole.UserRole)))
+        self.jobs_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.jobs_list.customContextMenuRequested.connect(self._show_job_menu)
         open_folder = QPushButton("Open folder")
         open_folder.clicked.connect(self.open_output_folder)
         refresh = QPushButton("Refresh")
@@ -151,7 +150,7 @@ class MainWindow(QMainWindow):
         jobs_buttons.addStretch(1)
         jobs_buttons.addWidget(refresh)
         jobs_buttons.addWidget(open_folder)
-        jobs_box = QGroupBox("Jobs (double-click to open)")
+        jobs_box = QGroupBox("Jobs (double-click to open PDF, right-click for JSON)")
         jobs_layout = QVBoxLayout(jobs_box)
         jobs_layout.addWidget(self.jobs_list)
         jobs_layout.addLayout(jobs_buttons)
@@ -261,9 +260,8 @@ class MainWindow(QMainWindow):
         self.host_edit.setText(str(s.value("host", "0.0.0.0")))
         self.port_spin.setValue(int(s.value("port", 9100)))
         self.paper_combo.setCurrentIndex(max(0, self.paper_combo.findData(str(s.value("paper", "80")))))
-        self.output_edit.setText(str(s.value("output", str(DEFAULT_OUTPUT))))
+        self.output_edit.setText(str(s.value("receipts_dir", str(DEFAULT_OUTPUT))))
         self.idle_spin.setValue(float(s.value("idle_timeout", 10.0)))
-        self.raw_check.setChecked(s.value("save_raw", False, type=bool))
         self.forward_mode.setCurrentIndex(max(0, self.forward_mode.findData(str(s.value("forward_mode", OFF)))))
         self.forward_host.setText(str(s.value("forward_host", "")))
         self.forward_port.setValue(int(s.value("forward_port", 9100)))
@@ -275,16 +273,15 @@ class MainWindow(QMainWindow):
         s.setValue("host", self.host_edit.text().strip())
         s.setValue("port", self.port_spin.value())
         s.setValue("paper", self.paper_combo.currentData())
-        s.setValue("output", self.output_edit.text().strip())
+        s.setValue("receipts_dir", self.output_edit.text().strip())
         s.setValue("idle_timeout", self.idle_spin.value())
-        s.setValue("save_raw", self.raw_check.isChecked())
         s.setValue("forward_mode", self.forward_mode.currentData())
         s.setValue("forward_host", self.forward_host.text().strip())
         s.setValue("forward_port", self.forward_port.value())
         s.setValue("forward_printer", self.forward_printer.currentText().strip())
 
     def _browse_output(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Output folder", self.output_edit.text())
+        folder = QFileDialog.getExistingDirectory(self, "Receipts folder", self.output_edit.text())
         if folder:
             self.output_edit.setText(folder)
 
@@ -309,7 +306,6 @@ class MainWindow(QMainWindow):
             paper_mm,
             paper_dots,
             self.idle_spin.value(),
-            self.raw_check.isChecked(),
             self._forward_target(),
             parent=self,
         )
@@ -364,9 +360,10 @@ class MainWindow(QMainWindow):
 
     def refresh_jobs(self) -> None:
         self.jobs_list.clear()
-        if not self.output_dir.is_dir():
+        pdf_dir = self.output_dir / "pdf"
+        if not pdf_dir.is_dir():
             return
-        pdfs = sorted(self.output_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
+        pdfs = sorted(pdf_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
         for path in pdfs[:500]:
             self._add_job_item(path)
         if pdfs and self.last_job is None:
@@ -379,6 +376,18 @@ class MainWindow(QMainWindow):
 
     def _open_path(self, path: str | Path) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _show_job_menu(self, pos) -> None:
+        item = self.jobs_list.itemAt(pos)
+        if not item:
+            return
+        pdf = Path(item.data(Qt.ItemDataRole.UserRole))
+        json_file = self.output_dir / "json" / f"{pdf.stem}.json"
+        menu = QMenu(self)
+        menu.addAction("Open PDF", lambda: self._open_path(pdf))
+        menu.addAction("Open JSON", lambda: self._open_path(json_file)).setEnabled(json_file.exists())
+        menu.addAction("Copy JSON path", lambda: QApplication.clipboard().setText(str(json_file))).setEnabled(json_file.exists())
+        menu.exec(self.jobs_list.viewport().mapToGlobal(pos))
 
     def open_last_job(self) -> None:
         if self.last_job and self.last_job.exists():

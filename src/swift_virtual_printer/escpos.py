@@ -464,6 +464,36 @@ class EscPosParser:
 _CODE128_ESCAPE = re.compile(r"\{(.)")
 
 
+def elements_to_lines(elements: list[Element]) -> list[str]:
+    """Plain-text view of a receipt: one string per printed line, with markers for graphics and cuts."""
+    lines: list[str] = []
+    for element in elements:
+        if isinstance(element, Line):
+            parts = []
+            for item in element.items:
+                if isinstance(item, TextCell):
+                    parts.append(item.char)
+                elif isinstance(item, Spacer):
+                    parts.append(" " * max(1, round(item.width / FONT_CELLS[0][0])))
+                else:
+                    w, h = item.size
+                    parts.append(f"[IMAGE {w}x{h}]")
+            lines.append("".join(parts).rstrip())
+        elif isinstance(element, Feed):
+            lines.append("")
+        elif isinstance(element, ImageBlock):
+            w, h = element.bitmap.size
+            lines.append(f"[IMAGE {w}x{h}]")
+        elif isinstance(element, QRBlock):
+            lines.append(f"[QR] {element.data.decode('utf-8', errors='replace')}")
+        elif isinstance(element, BarcodeBlock):
+            data = normalize_barcode_data(element.symbology, element.data)
+            lines.append(f"[BARCODE {element.symbology}] {data}")
+        elif isinstance(element, Cut):
+            lines.append("[CUT]")
+    return lines
+
+
 def normalize_barcode_data(symbology: str, data: str) -> str:
     """Strip ESC/POS-specific control sequences from barcode payloads."""
     if symbology == "code128":

@@ -6,6 +6,7 @@ __pycache__/
 
 # App output
 jobs/
+receipts/
 
 # Build output (PyInstaller, Inno Setup); virtual-printer.spec is tracked on purpose
 build/
