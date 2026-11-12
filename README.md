@@ -58,6 +58,18 @@ uv run virtual-printer-gui --minimized  # start hidden in the tray
 - Receipts are saved in the `receipts` folder next to the app (see [Saved receipts](#saved-receipts)).
 - Right-click a job in the list to open its JSON or copy the JSON file's path.
 
+### Updates
+
+The app checks [GitHub Releases](https://github.com/Bikitsos/swift-virtual-printer/releases) for a newer version 5 seconds after it starts. Turn this off under **Help → Check for updates on startup**. When an update is found, a tray notification appears; click it to see what's new. To check by hand, use **Help → Check for updates...** or the tray menu.
+
+Choosing **Download and install** does the following:
+
+1. downloads `SwiftVirtualPrinter-Setup-X.Y.Z.exe` from the release and checks it against the SHA-256 digest GitHub publishes (only GitHub HTTPS addresses are accepted)
+2. starts the installer silently and closes the app (Windows asks for permission if the app was installed for all users)
+3. restarts the app once the update has finished; settings and receipts are kept
+
+When running from source (`uv run`), the app only offers to open the release page.
+
 ### Command line
 
 ```powershell
@@ -215,6 +227,7 @@ src/swift_virtual_printer/
   render.py   PDF renderer (QPdfWriter / QPainter)
   server.py   TCP print server (QTcpServer)
   forward.py  forwarding to a real printer (raw TCP / Windows spooler)
+  updater.py  update check, download and install from GitHub Releases
   main.py     command-line entry point
   gui.py      system tray app
 scripts/

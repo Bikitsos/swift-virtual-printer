@@ -8,7 +8,7 @@ import signal
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
     QSplitter,
@@ -38,6 +39,7 @@ from . import APP_NAME, COMPANY, CREDITS, __version__, build_info, default_recei
 from .forward import NETWORK, OFF, WINDOWS, ForwardTarget, list_windows_printers
 from .main import PAPER_SIZES
 from .server import PrintServer
+from .updater import Release, UpdateChecker, UpdateDownloader, can_self_update, is_newer, run_installer
 
 DEFAULT_OUTPUT = default_receipts_dir()
 
@@ -84,8 +86,12 @@ class MainWindow(QMainWindow):
         self.server: PrintServer | None = None
         self.last_job: Path | None = None
         self._tray_hint_shown = False
+        self._tray_click = self.open_last_job
+        self._update_silent = False
         self._icon_on, self._icon_off = make_icon(True), make_icon(False)
         self.setWindowIcon(self._icon_on)
+        self.update_checker = UpdateChecker(self)
+        self.update_checker.finished.connect(self._on_update_checked)
 
         self._build_ui()
         self._build_menu()
@@ -95,6 +101,8 @@ class MainWindow(QMainWindow):
         logging.info("%s %s (%s)", APP_NAME, __version__, build_info()[0])
         self.start_server()
         self.refresh_jobs()
+        if self.auto_update_action.isChecked():
+            QTimer.singleShot(5000, lambda: self.check_for_updates(silent=True))
 
     # -- UI construction ----------------------------------------------------
 
@@ -219,7 +227,103 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction("Quit", self.quit)
         help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction("Check for updates...", self.check_for_updates)
+        self.auto_update_action = help_menu.addAction("Check for updates on startup")
+        self.auto_update_action.setCheckable(True)
+        self.auto_update_action.setChecked(self.settings.value("auto_update_check", True, type=bool))
+        self.auto_update_action.toggled.connect(lambda on: self.settings.setValue("auto_update_check", on))
+        help_menu.addSeparator()
         help_menu.addAction("About", self.show_about)
+
+    # -- updates ------------------------------------------------------------
+
+    def check_for_updates(self, silent: bool = False) -> None:
+        self._update_silent = silent
+        logging.info("Checking for updates...")
+        self.update_checker.check()
+
+    def _on_update_checked(self, release: Release | None, error: str) -> None:
+        silent = self._update_silent
+        if error or release is None:
+            logging.warning("Update check failed: %s", error)
+            if not silent:
+                QMessageBox.warning(self, "Check for updates", f"Could not check for updates.\n\n{error}")
+            return
+        if not is_newer(release.version):
+            logging.info("Up to date (latest release is %s)", release.version)
+            if not silent:
+                QMessageBox.information(self, "Check for updates", f"You have the latest version ({__version__}).")
+            return
+        logging.info("Update available: %s", release.version)
+        if silent:
+            self._tray_click = lambda: self._prompt_update(release)
+            self.tray.showMessage(
+                "Update available",
+                f"Version {release.version} is available. Click to update.",
+                QSystemTrayIcon.MessageIcon.Information,
+                10000,
+            )
+        else:
+            self._prompt_update(release)
+
+    def _prompt_update(self, release: Release) -> None:
+        self.show_window()
+        notes = release.notes.strip()
+        if len(notes) > 1500:
+            notes = notes[:1500] + "\n..."
+        box = QMessageBox(self)
+        box.setWindowTitle("Update available")
+        box.setIconPixmap(self._icon_on.pixmap(64, 64))
+        box.setText(f"Version {release.version} is available (you have {__version__}).")
+        if notes:
+            box.setDetailedText(notes)
+        if can_self_update():
+            box.setInformativeText("Download and install it now? The app will close and restart after the update.")
+            install = box.addButton("Download and install", QMessageBox.ButtonRole.AcceptRole)
+        else:
+            box.setInformativeText("Automatic updates only work in the installed app. Open the release page instead?")
+            install = None
+        page = box.addButton("Open release page", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if install is not None and box.clickedButton() is install:
+            self._download_update(release)
+        elif box.clickedButton() is page:
+            QDesktopServices.openUrl(QUrl(release.page_url))
+
+    def _download_update(self, release: Release) -> None:
+        dialog = QProgressDialog(f"Downloading {release.asset_name}...", "Cancel", 0, 100, self)
+        dialog.setWindowTitle("Updating")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        downloader = UpdateDownloader(self)
+
+        def on_progress(done: int, total: int) -> None:
+            if total > 0:
+                dialog.setValue(int(done * 100 / total))
+
+        def on_finished(path: str, error: str) -> None:
+            dialog.close()
+            downloader.deleteLater()
+            if error:
+                if error != "Operation canceled":
+                    logging.error("Update download failed: %s", error)
+                    QMessageBox.warning(self, "Update failed", f"Could not download the update.\n\n{error}")
+                return
+            logging.info("Starting installer %s", path)
+            try:
+                run_installer(path)
+            except OSError as exc:
+                QMessageBox.warning(self, "Update failed", f"Could not start the installer.\n\n{exc}")
+                return
+            self.quit()
+
+        downloader.progress.connect(on_progress)
+        downloader.finished.connect(on_finished)
+        dialog.canceled.connect(downloader.cancel)
+        dialog.show()
+        downloader.start(release)
 
     def show_about(self) -> None:
         build_date, commit = build_info()
@@ -246,11 +350,12 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         self.tray_toggle: QAction = menu.addAction("Stop printer", self.toggle_server)
         menu.addSeparator()
+        menu.addAction("Check for updates...", self.check_for_updates)
         menu.addAction("About", self.show_about)
         menu.addAction("Quit", self.quit)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
-        self.tray.messageClicked.connect(self.open_last_job)
+        self.tray.messageClicked.connect(lambda: self._tray_click())
         self.tray.show()
 
     # -- settings -----------------------------------------------------------
@@ -371,6 +476,7 @@ class MainWindow(QMainWindow):
 
     def _on_job_saved(self, path: Path) -> None:
         self.last_job = path
+        self._tray_click = self.open_last_job
         self._add_job_item(path, top=True)
         self.tray.showMessage("Print job received", f"{path.name}\nClick to open.", QSystemTrayIcon.MessageIcon.Information, 4000)
 

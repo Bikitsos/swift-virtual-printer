@@ -65,6 +65,8 @@ Root: HKCU; Subkey: "Software\SwiftVirtualPrinter"; Flags: uninsdeletekey dontcr
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#MyAppName}"" dir=in action=allow protocol=TCP localport=9100 program=""{app}\{#MyAppExeName}"""; Flags: runhidden; Tasks: firewall
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; Silent installs come from the in-app updater: restart the app as the original (non-elevated) user.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden; RunOnceId: "KillApp"

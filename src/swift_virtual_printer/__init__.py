@@ -11,6 +11,7 @@ APP_NAME = "Swift Virtual Printer"
 AUTHOR = "Bikitsos"
 COMPANY = "db IMMIX"
 CREDITS = f"Software built by {AUTHOR} for {COMPANY}"
+GITHUB_REPO = "Bikitsos/swift-virtual-printer"
 
 
 def build_info() -> tuple[str, str]:
