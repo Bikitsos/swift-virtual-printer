@@ -10,7 +10,10 @@ if "%~1"=="" (
 )
 
 git diff --quiet && git diff --cached --quiet || (
-    echo [ERROR] You have uncommitted changes. Commit or stash them first.
+    echo [ERROR] You have uncommitted changes. Commit them first, e.g.:
+    echo     git add -A ^&^& git commit -m "Describe your changes"
+    echo.
+    git status --short
     exit /b 1
 )
 
