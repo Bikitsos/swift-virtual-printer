@@ -12,7 +12,7 @@ from PySide6.QtNetwork import QHostAddress, QNetworkInterface, QTcpServer, QTcpS
 
 from . import APP_NAME, __version__
 from .classify import RECEIPT_MARKER, is_receipt, strip_marker
-from .escpos import EscPosParser, elements_to_lines
+from .escpos import Cut, EscPosParser, elements_to_lines
 from .forward import NETWORK, ForwardTarget, forward_async
 from .logo import LogoSettings, bitmap_to_escpos, inject, load_logo
 from .render import PdfRenderer
@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 MAX_JOB_BYTES = 64 * 1024 * 1024
 DLE_EOT = b"\x10\x04"
 STATUS_ONLINE = b"\x12"
+# GS V 66 0: feed to the cutter position, then partial cut.
+AUTO_CUT = b"\x1dV\x42\x00"
 SUBFOLDERS = ("bin", "pdf", "json", "final")
 
 
@@ -43,6 +45,7 @@ class PrintServer(QObject):
         idle_timeout: float,
         forward_target: ForwardTarget | None = None,
         logo: LogoSettings | None = None,
+        auto_cut: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -54,6 +57,7 @@ class PrintServer(QObject):
         self.idle_ms = int(idle_timeout * 1000)
         self.forward_target = forward_target or ForwardTarget()
         self.logo = logo or LogoSettings()
+        self.auto_cut = auto_cut
         self._logo_bytes = b""
         self.renderer = PdfRenderer(paper_mm, paper_dots)
         self._counter = 0
@@ -77,6 +81,8 @@ class PrintServer(QObject):
         log.info("Jobs not starting with %s are saved to %s without logo", RECEIPT_MARKER, self.misc_dir.resolve())
         if self.forward_target.enabled:
             log.info("Forwarding jobs to %s", self.forward_target)
+        if self.auto_cut:
+            log.info("Adding a paper cut to jobs that have none")
 
     @property
     def misc_dir(self) -> Path:
@@ -166,6 +172,9 @@ class PrintServer(QObject):
         else:
             root, category = self.misc_dir, "misc"
             printed = data
+        cut_added = self.auto_cut and not any(isinstance(e, Cut) for e in received_elements)
+        if cut_added:
+            printed += AUTO_CUT
 
         bin_path = root / "bin" / f"{stem}.bin"
         pdf_path = root / "pdf" / f"{stem}.pdf"
@@ -196,6 +205,7 @@ class PrintServer(QObject):
                     "final_pdf": f"final/{final_pdf.name}",
                 },
                 "logo": Path(self.logo.path).name if receipt and self._logo_bytes else None,
+                "cut_added": cut_added,
                 "line_count": len(lines),
                 "lines": {f"line_{i:03d}": text for i, text in enumerate(lines, 1)},
             }

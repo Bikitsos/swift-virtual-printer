@@ -29,6 +29,7 @@ def main() -> int:
     parser.add_argument("--logo", metavar="IMAGE", help="PNG/JPG printed at the top of every job (PDF and real printer)")
     parser.add_argument("--logo-width", type=int, default=60, metavar="PERCENT", help="logo width as %% of paper width (default: 60)")
     parser.add_argument("--logo-dither", action="store_true", help="dither the logo (better for photos)")
+    parser.add_argument("--auto-cut", action="store_true", help="add a paper cut to jobs that don't contain one")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -56,7 +57,7 @@ def main() -> int:
     logo = LogoSettings(args.logo or "", max(10, min(100, args.logo_width)), args.logo_dither)
     paper_mm, paper_dots = PAPER_SIZES[args.paper]
     server = PrintServer(
-        args.host, args.port, args.output or default_receipts_dir(), paper_mm, paper_dots, args.idle_timeout, target, logo
+        args.host, args.port, args.output or default_receipts_dir(), paper_mm, paper_dots, args.idle_timeout, target, logo, args.auto_cut
     )
     try:
         server.start()

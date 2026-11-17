@@ -442,6 +442,8 @@ class MainWindow(QMainWindow):
         self.idle_spin = QDoubleSpinBox()
         self.idle_spin.setRange(1, 600)
         self.idle_spin.setSuffix(" s")
+        self.auto_cut_check = QCheckBox("Add a paper cut when the document has none")
+        self.auto_cut_check.setToolTip("Appends an ESC/POS cut (GS V 66 0: feed to cutter, partial cut) to jobs without a cut.")
 
         form = QFormLayout()
         form.addRow("Listen address", self.host_edit)
@@ -449,6 +451,7 @@ class MainWindow(QMainWindow):
         form.addRow("Paper width", self.paper_combo)
         form.addRow("Receipts folder", output_row)
         form.addRow("Idle timeout", self.idle_spin)
+        form.addRow("Paper cut", self.auto_cut_check)
 
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -676,7 +679,8 @@ class MainWindow(QMainWindow):
             f"Python {platform.python_version()}, Qt {qVersion()}, PySide6 {PySide6.__version__}, {platform.platform()}",
             f"Installed exe: {getattr(sys, 'frozen', False)}, app folder: {app_root()}",
             f"Status: {self.status_label.text()}",
-            f"Paper: {self.paper_combo.currentData()} mm, idle timeout: {self.idle_spin.value()} s",
+            f"Paper: {self.paper_combo.currentData()} mm, idle timeout: {self.idle_spin.value()} s, "
+            f"auto cut: {self.auto_cut_check.isChecked()}",
             f"Forwarding: {self.active_forward_target()}",
             f"Logo: {self._logo_settings()}",
             f"Settings: {self.settings.fileName()}",
@@ -821,6 +825,7 @@ class MainWindow(QMainWindow):
         self.paper_combo.setCurrentIndex(max(0, self.paper_combo.findData(str(s.value("paper", "80")))))
         self.output_edit.setText(str(s.value("receipts_dir", str(DEFAULT_OUTPUT))))
         self.idle_spin.setValue(float(s.value("idle_timeout", 10.0)))
+        self.auto_cut_check.setChecked(s.value("auto_cut", False, type=bool))
         self.forward_mode.setCurrentIndex(max(0, self.forward_mode.findData(str(s.value("forward_mode", OFF)))))
         self.forward_host.setText(str(s.value("forward_host", "")))
         self.forward_port.setValue(int(s.value("forward_port", 9100)))
@@ -839,6 +844,7 @@ class MainWindow(QMainWindow):
         s.setValue("paper", self.paper_combo.currentData())
         s.setValue("receipts_dir", self.output_edit.text().strip())
         s.setValue("idle_timeout", self.idle_spin.value())
+        s.setValue("auto_cut", self.auto_cut_check.isChecked())
         s.setValue("forward_mode", self.forward_mode.currentData())
         s.setValue("forward_host", self.forward_host.text().strip())
         s.setValue("forward_port", self.forward_port.value())
@@ -876,6 +882,7 @@ class MainWindow(QMainWindow):
             self.idle_spin.value(),
             self._forward_target(),
             self._logo_settings(),
+            self.auto_cut_check.isChecked(),
             parent=self,
         )
         try:

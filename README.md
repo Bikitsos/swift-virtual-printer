@@ -16,6 +16,7 @@ Built with [PySide6](https://doc.qt.io/qtforpython/) and managed with [uv](https
 - Optionally forwards each job's original bytes to a real printer (network raw TCP or an installed Windows printer)
 - Optional PNG/JPG logo printed at the top of every receipt, in the PDF and on the real printer
 - Sorts jobs: receipts marked with `-R-R-R-` get the logo and go to `receipts/`; everything else prints without the logo and goes to `misc/`
+- Optional automatic paper cut for documents that don't contain one (**Printer** tab → *Add a paper cut when the document has none*). It appends `GS V 66 0` (feed to the cutter, partial cut) to the final copy and the real printer, and records `"cut_added"` in the JSON.
 
 ### Supported ESC/POS commands
 
@@ -105,6 +106,7 @@ uv run virtual-printer [options]
 | `--logo` | | PNG/JPG printed at the top of every job |
 | `--logo-width` | `60` | Logo width as % of the paper width |
 | `--logo-dither` | off | Dither the logo (better for photos and gradients) |
+| `--auto-cut` | off | Add a paper cut to jobs that don't contain one |
 | `--forward-printer` | | Also send each job to an installed Windows printer (RAW); cannot be combined with `--forward-host` |
 
 Press `Ctrl+C` to stop.
