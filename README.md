@@ -191,6 +191,18 @@ The virtual printer can pass every job on, byte for byte, to a real ESC/POS prin
 
 Forwarding runs in the background. A failure (for example the printer being offline) is written to the log and does not affect the PDF. Settings that would forward to the virtual printer itself are refused. Do not point a Windows printer queue back at the virtual printer, because that would also create a loop.
 
+### Printer status
+
+The **Forwarding** tab shows whether the real printer is ready (**Check now** checks immediately). The status bar shows it too: green means ready, orange means online but with a warning such as *paper near end*, red means offline. With *Check every 30 s* turned on (the default), a tray notification appears when the printer goes offline, runs out of paper, or comes back. Reprinting to a printer that looks offline asks for confirmation first.
+
+| Printer type | How the status is read | Detects |
+| --- | --- | --- |
+| Network (raw TCP) | ESC/POS real-time status `DLE EOT 1-4` | offline, cover open, paper near end/out, cutter and other errors, no response |
+| Installed Windows printer with the **Epson Advanced Printer Driver** (e.g. TM-T88IV USB) | Epson Status API (`EpsStmApi.dll`) | offline/turned off, cover open, paper near end/out, cutter and other errors |
+| Other installed Windows printers | Windows print queue | paused, offline / "Use printer offline", paper problems, error, jobs stuck in the queue |
+
+The Forwarding tab shows which method was used (*via ...*). If the Epson Status API isn't installed, the app falls back to the Windows print queue. The queue is less precise: a USB printer that is switched off often shows up only once a job gets stuck.
+
 ## Building a Windows exe
 
 ```powershell

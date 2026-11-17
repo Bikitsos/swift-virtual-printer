@@ -7,6 +7,7 @@ import logging
 import platform
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,10 +53,12 @@ from .logo import LogoSettings, load_logo
 from .render import PdfRenderer, bitmap_to_qimage
 from .main import PAPER_SIZES
 from .server import PrintServer, misc_dir_for
+from .printer_status import PrinterStatus, check_status
 from .updater import Release, UpdateChecker, UpdateDownloader, can_self_update, is_newer, run_installer
 
 DEFAULT_OUTPUT = default_receipts_dir()
 LOGO_PREVIEW_WIDTH = 400
+PRINTER_CHECK_SECONDS = 30
 
 
 def _hint(text: str) -> QLabel:
@@ -325,6 +328,8 @@ class ServiceDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    _printer_status_signal = Signal(object, bool)
+
     def __init__(self, log_emitter: LogEmitter) -> None:
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} {__version__}")
@@ -341,6 +346,12 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(self._icon_on)
         self.update_checker = UpdateChecker(self)
         self.update_checker.finished.connect(self._on_update_checked)
+        self._printer_status: PrinterStatus | None = None
+        self._printer_checking = False
+        self._printer_status_signal.connect(self._on_printer_status)
+        self._printer_timer = QTimer(self)
+        self._printer_timer.setInterval(PRINTER_CHECK_SECONDS * 1000)
+        self._printer_timer.timeout.connect(self.check_printer)
 
         self._build_ui()
         self._build_menu()
@@ -425,6 +436,10 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel()
         self.statusBar().addWidget(self.status_dot)
         self.statusBar().addWidget(self.status_label, 1)
+        self.printer_dot = QLabel("\u25cf")
+        self.printer_label = QLabel()
+        self.statusBar().addPermanentWidget(self.printer_dot)
+        self.statusBar().addPermanentWidget(self.printer_label)
 
     def _build_printer_tab(self) -> QWidget:
         self.host_edit = QLineEdit()
@@ -491,9 +506,25 @@ class MainWindow(QMainWindow):
         self.forward_form.addRow("Windows printer", self.forward_printer)
         self.forward_mode.currentIndexChanged.connect(self._update_forward_fields)
 
+        self.printer_status_label = QLabel("Not checked yet")
+        self.printer_status_label.setWordWrap(True)
+        check_now = QPushButton("Check now")
+        check_now.clicked.connect(lambda: self.check_printer(manual=True))
+        status_row = QHBoxLayout()
+        status_row.addWidget(self.printer_status_label, 1)
+        status_row.addWidget(check_now)
+        self.monitor_check = QCheckBox(f"Check every {PRINTER_CHECK_SECONDS} s and notify when it goes offline or runs out of paper")
+        self.forward_form.addRow("Printer status", status_row)
+        self.forward_form.addRow("", self.monitor_check)
+        self.monitor_check.toggled.connect(self._update_printer_timer)
+
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(_hint("Also send every job, byte for byte (with the logo if enabled), to a real receipt printer."))
+        layout.addWidget(_hint(
+            "Also send every job, byte for byte (with the logo if enabled), to a real receipt printer. "
+            "Status uses ESC/POS for network printers and the Epson Status API or Windows print queue for "
+            "installed (USB) printers."
+        ))
         layout.addLayout(self.forward_form)
         layout.addStretch(1)
         return page
@@ -842,6 +873,7 @@ class MainWindow(QMainWindow):
         self.logo_path.setText(str(s.value("logo_path", "")))
         self.logo_width.setValue(int(s.value("logo_width", 60)))
         self.logo_dither.setChecked(s.value("logo_dither", False, type=bool))
+        self.monitor_check.setChecked(s.value("monitor_printer", True, type=bool))
         self._update_logo_preview()
 
     def _save_settings(self) -> None:
@@ -861,6 +893,7 @@ class MainWindow(QMainWindow):
         s.setValue("logo_path", self.logo_path.text().strip())
         s.setValue("logo_width", self.logo_width.value())
         s.setValue("logo_dither", self.logo_dither.isChecked())
+        s.setValue("monitor_printer", self.monitor_check.isChecked())
 
     def _browse_output(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Receipts folder", self.output_edit.text())
@@ -905,6 +938,10 @@ class MainWindow(QMainWindow):
         server.job_saved.connect(self._on_job_saved)
         self.server = server
         self._set_running(True)
+        # Target may have changed: forget the old status and check the (new) real printer.
+        self._printer_status = None
+        self._update_printer_timer()
+        QTimer.singleShot(1000, self.check_printer)
 
     def stop_server(self) -> None:
         if self.server:
@@ -1016,8 +1053,69 @@ class MainWindow(QMainWindow):
         if path is None:
             QMessageBox.warning(self, "Reprint", f"No print data saved for {job.stem}.")
             return
+        status = self._printer_status
+        if status is not None and status.online is False:
+            answer = QMessageBox.question(self, "Reprint", f"The printer looks offline ({status}).\n\nSend the reprint anyway?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         forward_async(target, path.read_bytes(), f"{job.stem} (reprint)")
         self.statusBar().showMessage(f"Reprint of {job.stem} sent to {target}", 6000)
+
+    # -- real printer status -------------------------------------------------
+
+    def _update_printer_timer(self) -> None:
+        if self.monitor_check.isChecked() and self.active_forward_target().enabled:
+            self._printer_timer.start()
+        else:
+            self._printer_timer.stop()
+        if not self.active_forward_target().enabled:
+            self._show_printer_status(None)
+
+    def check_printer(self, manual: bool = False) -> None:
+        target = self.active_forward_target()
+        if not target.enabled:
+            self._show_printer_status(None)
+            if manual:
+                QMessageBox.information(self, "Printer status", "No real printer is set up on the Forwarding tab.")
+            return
+        if self._printer_checking:
+            return
+        self._printer_checking = True
+        if manual:
+            self.printer_status_label.setText("Checking...")
+
+        def run() -> None:
+            try:
+                status = check_status(target)
+            except Exception as exc:  # status checks must never take the app down
+                status = PrinterStatus(None, (f"check failed: {exc}",))
+            self._printer_status_signal.emit(status, manual)
+
+        threading.Thread(target=run, name="printer-status", daemon=True).start()
+
+    def _on_printer_status(self, status: PrinterStatus, manual: bool) -> None:
+        self._printer_checking = False
+        previous, self._printer_status = self._printer_status, status
+        self._show_printer_status(status)
+        changed = previous is None or (previous.online, previous.problems) != (status.online, status.problems)
+        if changed or manual:
+            log = logging.info if status.ok else logging.warning
+            log("Real printer: %s (%s)", status, status.source or "no source")
+        if changed and previous is not None and not manual:
+            icon = QSystemTrayIcon.MessageIcon.Information if status.ok else QSystemTrayIcon.MessageIcon.Warning
+            title = "Printer is back online" if status.ok else "Printer problem"
+            self.tray.showMessage(title, f"{self.active_forward_target()}\n{status}", icon, 8000)
+
+    def _show_printer_status(self, status: PrinterStatus | None) -> None:
+        if status is None:
+            text, color, detail = "Real printer: not set up", "#9e9e9e", "No real printer is set up."
+        else:
+            text = f"Real printer: {status}"
+            color = "#2e7d32" if status.ok else "#9e9e9e" if status.online is None else "#ef6c00" if status.online else "#c62828"
+            detail = f"{status}  (via {status.source})" if status.source else str(status)
+        self.printer_label.setText(text)
+        self.printer_dot.setStyleSheet(f"font-size: 14pt; color: {color};")
+        self.printer_status_label.setText(detail)
 
     def open_output_folder(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
