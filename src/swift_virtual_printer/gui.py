@@ -47,7 +47,7 @@ from .forward import NETWORK, OFF, WINDOWS, ForwardTarget, forward_async, list_w
 from .logo import LogoSettings, load_logo
 from .render import PdfRenderer, bitmap_to_qimage
 from .main import PAPER_SIZES
-from .server import PrintServer
+from .server import PrintServer, misc_dir_for
 from .updater import Release, UpdateChecker, UpdateDownloader, can_self_update, is_newer, run_installer
 
 DEFAULT_OUTPUT = default_receipts_dir()
@@ -218,7 +218,7 @@ class MainWindow(QMainWindow):
         self.resize(1040, 640)
         self.settings = QSettings("SwiftVirtualPrinter", "VirtualPrinter")
         self.server: PrintServer | None = None
-        self.last_job: str | None = None
+        self.last_job: Job | None = None
         self._tray_hint_shown = False
         self._tray_click = self.preview_last_job
         self._update_silent = False
@@ -264,19 +264,20 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(buttons)
 
         self.jobs_list = QListWidget()
-        self.jobs_list.itemDoubleClicked.connect(
-            lambda item: self.preview_job(self._job(item.data(Qt.ItemDataRole.UserRole)))
-        )
+        self.jobs_list.itemDoubleClicked.connect(lambda item: self.preview_job(self._job_at(item)))
         self.jobs_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.jobs_list.customContextMenuRequested.connect(self._show_job_menu)
-        open_folder = QPushButton("Open folder")
+        open_folder = QPushButton("Receipts folder")
         open_folder.clicked.connect(self.open_output_folder)
+        open_misc = QPushButton("Misc folder")
+        open_misc.clicked.connect(self.open_misc_folder)
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(self.refresh_jobs)
         jobs_buttons = QHBoxLayout()
         jobs_buttons.addWidget(_hint("Double-click to preview, right-click to reprint or open files."), 1)
         jobs_buttons.addWidget(refresh)
         jobs_buttons.addWidget(open_folder)
+        jobs_buttons.addWidget(open_misc)
         jobs_box = QGroupBox("Jobs")
         jobs_layout = QVBoxLayout(jobs_box)
         jobs_layout.addWidget(self.jobs_list)
@@ -336,7 +337,11 @@ class MainWindow(QMainWindow):
 
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(_hint("POS software prints to this address and port. Each job is saved as .bin, .pdf and .json."))
+        layout.addWidget(_hint(
+            "POS software prints to this address and port. Jobs whose first line is -R-R-R- are receipts: "
+            "the marker line is removed, the logo is added and they are saved in the receipts folder. "
+            "All other documents are printed without logo and saved in the misc folder next to it."
+        ))
         layout.addLayout(form)
         layout.addStretch(1)
         return page
@@ -469,7 +474,8 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
-        file_menu.addAction("Open jobs folder", self.open_output_folder)
+        file_menu.addAction("Open receipts folder", self.open_output_folder)
+        file_menu.addAction("Open misc folder", self.open_misc_folder)
         file_menu.addSeparator()
         file_menu.addAction("Quit", self.quit)
         help_menu = self.menuBar().addMenu("&Help")
@@ -592,7 +598,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Show window", self.show_window)
         menu.addAction("Preview last job", self.preview_last_job)
-        menu.addAction("Open jobs folder", self.open_output_folder)
+        menu.addAction("Open receipts folder", self.open_output_folder)
+        menu.addAction("Open misc folder", self.open_misc_folder)
         menu.addSeparator()
         self.tray_toggle: QAction = menu.addAction("Stop printer", self.toggle_server)
         menu.addSeparator()
@@ -711,13 +718,16 @@ class MainWindow(QMainWindow):
 
     # -- jobs ---------------------------------------------------------------
 
-    def _job(self, stem: str) -> Job:
-        return Job(self.output_dir, stem)
+    def _job_at(self, item: QListWidgetItem) -> Job:
+        return item.data(Qt.ItemDataRole.UserRole)
 
-    def _add_job_item(self, stem: str, top: bool = False) -> None:
-        item = QListWidgetItem(stem)
-        item.setData(Qt.ItemDataRole.UserRole, stem)
-        item.setToolTip(str(self._job(stem).best_pdf))
+    def _add_job_item(self, job: Job, top: bool = False) -> None:
+        is_misc = job.root == self.misc_dir
+        item = QListWidgetItem(f"{job.stem}    (misc)" if is_misc else job.stem)
+        item.setData(Qt.ItemDataRole.UserRole, job)
+        item.setToolTip(str(job.best_pdf))
+        if is_misc:
+            item.setForeground(QColor("#777777"))
         if top:
             self.jobs_list.insertItem(0, item)
         else:
@@ -725,23 +735,27 @@ class MainWindow(QMainWindow):
 
     def refresh_jobs(self) -> None:
         self.jobs_list.clear()
-        pdfs: dict[str, float] = {}
-        for folder in ("pdf", "final"):
-            directory = self.output_dir / folder
-            if directory.is_dir():
-                for path in directory.glob("*.pdf"):
-                    pdfs[path.stem] = max(pdfs.get(path.stem, 0.0), path.stat().st_mtime)
-        stems = sorted(pdfs, key=pdfs.get, reverse=True)
-        for stem in stems[:500]:
-            self._add_job_item(stem)
-        if stems and self.last_job is None:
-            self.last_job = stems[0]
+        found: dict[Job, float] = {}
+        for root in (self.output_dir, self.misc_dir):
+            for folder in ("pdf", "final"):
+                directory = root / folder
+                if directory.is_dir():
+                    for path in directory.glob("*.pdf"):
+                        job = Job(root, path.stem)
+                        found[job] = max(found.get(job, 0.0), path.stat().st_mtime)
+        jobs = sorted(found, key=found.get, reverse=True)
+        for job in jobs[:500]:
+            self._add_job_item(job)
+        if jobs and self.last_job is None:
+            self.last_job = jobs[0]
 
     def _on_job_saved(self, path: Path) -> None:
-        self.last_job = path.stem
+        job = Job(path.parent.parent, path.stem)
+        self.last_job = job
         self._tray_click = self.preview_last_job
-        self._add_job_item(path.stem, top=True)
-        self.tray.showMessage("Print job received", f"{path.stem}\nClick to preview.", QSystemTrayIcon.MessageIcon.Information, 4000)
+        self._add_job_item(job, top=True)
+        kind = "Document (misc)" if job.root == self.misc_dir else "Receipt"
+        self.tray.showMessage(f"{kind} received", f"{path.stem}\nClick to preview.", QSystemTrayIcon.MessageIcon.Information, 4000)
 
     def _open_path(self, path: str | Path) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
@@ -750,7 +764,7 @@ class MainWindow(QMainWindow):
         item = self.jobs_list.itemAt(pos)
         if not item:
             return
-        job = self._job(item.data(Qt.ItemDataRole.UserRole))
+        job = self._job_at(item)
         menu = QMenu(self)
         menu.addAction("Preview", lambda: self.preview_job(job))
         menu.addAction("Reprint", lambda: self.reprint_job(job)).setEnabled(job.print_bytes_path is not None)
@@ -769,7 +783,7 @@ class MainWindow(QMainWindow):
     def preview_last_job(self) -> None:
         if self.last_job:
             self.show_window()
-            self.preview_job(self._job(self.last_job))
+            self.preview_job(self.last_job)
 
     def active_forward_target(self) -> ForwardTarget:
         return self.server.forward_target if self.server else self._forward_target()
@@ -791,6 +805,14 @@ class MainWindow(QMainWindow):
     def open_output_folder(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._open_path(self.output_dir)
+
+    def open_misc_folder(self) -> None:
+        self.misc_dir.mkdir(parents=True, exist_ok=True)
+        self._open_path(self.misc_dir)
+
+    @property
+    def misc_dir(self) -> Path:
+        return misc_dir_for(self.output_dir)
 
     # -- window / tray behaviour --------------------------------------------
 

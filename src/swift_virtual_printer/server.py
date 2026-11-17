@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QHostAddress, QNetworkInterface, QTcpServer, QTcpSocket
 
 from . import APP_NAME, __version__
+from .classify import RECEIPT_MARKER, is_receipt, strip_marker
 from .escpos import EscPosParser, elements_to_lines
 from .forward import NETWORK, ForwardTarget, forward_async
 from .logo import LogoSettings, bitmap_to_escpos, inject, load_logo
@@ -22,6 +23,11 @@ MAX_JOB_BYTES = 64 * 1024 * 1024
 DLE_EOT = b"\x10\x04"
 STATUS_ONLINE = b"\x12"
 SUBFOLDERS = ("bin", "pdf", "json", "final")
+
+
+def misc_dir_for(receipts_dir: Path) -> Path:
+    """Unmarked documents go to a `misc` folder next to the receipts folder."""
+    return receipts_dir.parent / "misc"
 
 
 class PrintServer(QObject):
@@ -68,12 +74,18 @@ class PrintServer(QObject):
         if not self._server.listen(QHostAddress(self.host), self.port):
             raise RuntimeError(f"Cannot listen on {self.host}:{self.port}: {self._server.errorString()}")
         log.info("Listening on %s:%d, saving receipts to %s", self.host, self.port, self.output_dir.resolve())
+        log.info("Jobs not starting with %s are saved to %s without logo", RECEIPT_MARKER, self.misc_dir.resolve())
         if self.forward_target.enabled:
             log.info("Forwarding jobs to %s", self.forward_target)
 
+    @property
+    def misc_dir(self) -> Path:
+        return misc_dir_for(self.output_dir)
+
     def _make_dirs(self) -> None:
-        for name in SUBFOLDERS:
-            (self.output_dir / name).mkdir(parents=True, exist_ok=True)
+        for root in (self.output_dir, self.misc_dir):
+            for name in SUBFOLDERS:
+                (root / name).mkdir(parents=True, exist_ok=True)
 
     def _forwards_to_self(self) -> bool:
         target = self.forward_target
@@ -142,24 +154,36 @@ class PrintServer(QObject):
         received = datetime.now()
         stem = f"job_{received:%Y%m%d_%H%M%S}_{self._counter:04d}"
         self._make_dirs()
-        bin_path = self.output_dir / "bin" / f"{stem}.bin"
-        pdf_path = self.output_dir / "pdf" / f"{stem}.pdf"
-        json_path = self.output_dir / "json" / f"{stem}.json"
-        final_bin = self.output_dir / "final" / f"{stem}.bin"
-        final_pdf = self.output_dir / "final" / f"{stem}.pdf"
-        bin_path.write_bytes(data)
+
+        received_elements = EscPosParser(self.paper_dots).parse(data)
+        receipt = is_receipt(elements_to_lines(received_elements))
+        if receipt:
+            # Marked receipts: drop the marker line and add the logo.
+            root, category = self.output_dir, "receipt"
+            printed = strip_marker(data)
+            if self._logo_bytes:
+                printed = inject(printed, self._logo_bytes)
+        else:
+            root, category = self.misc_dir, "misc"
+            printed = data
+
+        bin_path = root / "bin" / f"{stem}.bin"
+        pdf_path = root / "pdf" / f"{stem}.pdf"
+        json_path = root / "json" / f"{stem}.json"
+        final_bin = root / "final" / f"{stem}.bin"
+        final_pdf = root / "final" / f"{stem}.pdf"
         # bin/ and pdf/ keep the job as received; final/ holds exactly what goes to the real printer.
-        printed = inject(data, self._logo_bytes) if self._logo_bytes else data
+        bin_path.write_bytes(data)
         final_bin.write_bytes(printed)
         if self.forward_target.enabled:
             forward_async(self.forward_target, printed, stem)
 
         try:
-            received_elements = EscPosParser(self.paper_dots).parse(data)
             elements = EscPosParser(self.paper_dots).parse(printed)
             lines = elements_to_lines(elements)
             record = {
                 "job": stem,
+                "category": category,
                 "received": received.isoformat(timespec="seconds"),
                 "client": peer,
                 "size_bytes": len(data),
@@ -171,7 +195,7 @@ class PrintServer(QObject):
                     "final_bin": f"final/{final_bin.name}",
                     "final_pdf": f"final/{final_pdf.name}",
                 },
-                "logo": Path(self.logo.path).name if self._logo_bytes else None,
+                "logo": Path(self.logo.path).name if receipt and self._logo_bytes else None,
                 "line_count": len(lines),
                 "lines": {f"line_{i:03d}": text for i, text in enumerate(lines, 1)},
             }
@@ -179,7 +203,7 @@ class PrintServer(QObject):
 
             self.renderer.render(received_elements, pdf_path)
             if self.renderer.render(elements, final_pdf):
-                log.info("Job from %s (%d bytes) -> %s", peer, len(data), stem)
+                log.info("%s from %s (%d bytes) -> %s", category.capitalize(), peer, len(data), stem)
                 self.job_saved.emit(final_pdf)
             else:
                 log.info("Job from %s (%d bytes) had nothing printable", peer, len(data))

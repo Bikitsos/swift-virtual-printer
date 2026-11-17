@@ -48,6 +48,11 @@ Name: "{app}\receipts\bin"; Flags: uninsneveruninstall
 Name: "{app}\receipts\pdf"; Flags: uninsneveruninstall
 Name: "{app}\receipts\json"; Flags: uninsneveruninstall
 Name: "{app}\receipts\final"; Flags: uninsneveruninstall
+Name: "{app}\misc"; Permissions: users-modify; Flags: uninsneveruninstall
+Name: "{app}\misc\bin"; Flags: uninsneveruninstall
+Name: "{app}\misc\pdf"; Flags: uninsneveruninstall
+Name: "{app}\misc\json"; Flags: uninsneveruninstall
+Name: "{app}\misc\final"; Flags: uninsneveruninstall
 
 [InstallDelete]
 ; Drop files from the previous version (and the old one-file exe layout) before copying the new ones.
