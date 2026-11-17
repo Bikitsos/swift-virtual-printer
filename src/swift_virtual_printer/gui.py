@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import platform
 import signal
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal, qVersion
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -41,7 +44,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import APP_NAME, COMPANY, CREDITS, __version__, build_info, default_receipts_dir
+from . import APP_NAME, COMPANY, CREDITS, __version__, app_root, build_info, default_receipts_dir
+from .admin import DEFAULT_PASSWORD_HASH, delete_job_files, folder_usage, format_size, hash_password, verify_password
 from .escpos import EscPosParser
 from .forward import NETWORK, OFF, WINDOWS, ForwardTarget, forward_async, list_windows_printers
 from .logo import LogoSettings, load_logo
@@ -211,6 +215,115 @@ class QtLogHandler(logging.Handler):
         self.emitter.message.emit(self.format(record))
 
 
+class ServiceDialog(QDialog):
+    """Administrative tools, shown after the service password has been entered."""
+
+    def __init__(self, window: MainWindow) -> None:
+        super().__init__(window)
+        self._window = window
+        self.setWindowTitle("Service")
+        self.setMinimumWidth(520)
+
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        restart = QPushButton("Restart service")
+        restart.clicked.connect(lambda: (window.restart_service(), self.refresh()))
+        stop = QPushButton("Stop")
+        stop.clicked.connect(lambda: (window.stop_server(), self.refresh()))
+        start = QPushButton("Start")
+        start.clicked.connect(lambda: (window.start_server(), self.refresh()))
+        service_buttons = QHBoxLayout()
+        service_buttons.addWidget(restart)
+        service_buttons.addWidget(stop)
+        service_buttons.addWidget(start)
+        service_box = QGroupBox("Print service")
+        service_layout = QVBoxLayout(service_box)
+        service_layout.addWidget(self.status)
+        service_layout.addLayout(service_buttons)
+
+        self.receipts_usage = QLabel()
+        self.misc_usage = QLabel()
+        empty_receipts = QPushButton("Empty...")
+        empty_receipts.clicked.connect(lambda: self._delete([(window.output_dir, "receipts")]))
+        empty_misc = QPushButton("Empty...")
+        empty_misc.clicked.connect(lambda: self._delete([(window.misc_dir, "misc")]))
+        self.days = QSpinBox()
+        self.days.setRange(1, 3650)
+        self.days.setValue(30)
+        self.days.setSuffix(" days")
+        delete_old = QPushButton("Delete...")
+        delete_old.clicked.connect(
+            lambda: self._delete([(window.output_dir, "receipts"), (window.misc_dir, "misc")], self.days.value())
+        )
+        storage = QFormLayout()
+        storage.addRow("Receipts", self._row(self.receipts_usage, empty_receipts))
+        storage.addRow("Misc", self._row(self.misc_usage, empty_misc))
+        older = QHBoxLayout()
+        older.addWidget(QLabel("Jobs older than"))
+        older.addWidget(self.days)
+        older.addStretch(1)
+        older.addWidget(delete_old)
+        storage.addRow("Clean up", older)
+        storage_box = QGroupBox("Storage (bin, pdf, json and final files; folders are kept)")
+        storage_box.setLayout(storage)
+
+        clear_log = QPushButton("Clear log")
+        clear_log.clicked.connect(window.log_view.clear)
+        diagnostics = QPushButton("Copy diagnostics")
+        diagnostics.clicked.connect(window.copy_diagnostics)
+        reset = QPushButton("Reset settings...")
+        reset.clicked.connect(lambda: (window.reset_settings(), self.refresh()))
+        password = QPushButton("Change password...")
+        password.clicked.connect(window.change_service_password)
+        maintenance = QHBoxLayout()
+        for button in (clear_log, diagnostics, reset, password):
+            maintenance.addWidget(button)
+        maintenance_box = QGroupBox("Maintenance")
+        maintenance_box.setLayout(maintenance)
+
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(service_box)
+        layout.addWidget(storage_box)
+        layout.addWidget(maintenance_box)
+        layout.addWidget(close)
+        self.refresh()
+
+    @staticmethod
+    def _row(label: QLabel, button: QPushButton) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addWidget(label, 1)
+        row.addWidget(button)
+        return row
+
+    def refresh(self) -> None:
+        self.status.setText(self._window.status_label.text())
+        for label, root in ((self.receipts_usage, self._window.output_dir), (self.misc_usage, self._window.misc_dir)):
+            count, size = folder_usage(root)
+            label.setText(f"{count} files, {format_size(size)}  -  {root}")
+
+    def _delete(self, roots: list[tuple[Path, str]], older_than_days: int | None = None) -> None:
+        usage = [(root, name, *folder_usage(root, older_than_days)) for root, name in roots]
+        count = sum(u[2] for u in usage)
+        if not count:
+            QMessageBox.information(self, "Service", "There are no matching files to delete.")
+            return
+        scope = f" older than {older_than_days} days" if older_than_days else ""
+        details = "\n".join(f"  {name}: {c} files ({format_size(s)})" for _, name, c, s in usage if c)
+        answer = QMessageBox.question(
+            self, "Service", f"Delete {count} job files{scope}?\n\n{details}\n\nThis cannot be undone."
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for root, name, _, _ in usage:
+            deleted = delete_job_files(root, older_than_days)
+            logging.info("Service: deleted %d files%s from %s", deleted, scope, name)
+        self._window.refresh_jobs()
+        self.refresh()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, log_emitter: LogEmitter) -> None:
         super().__init__()
@@ -222,6 +335,8 @@ class MainWindow(QMainWindow):
         self._tray_hint_shown = False
         self._tray_click = self.preview_last_job
         self._update_silent = False
+        self._service_failures = 0
+        self._service_locked_until = 0.0
         self._icon_on, self._icon_off = make_icon(True), make_icon(False)
         self.setWindowIcon(self._icon_on)
         self.update_checker = UpdateChecker(self)
@@ -478,6 +593,8 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Open misc folder", self.open_misc_folder)
         file_menu.addSeparator()
         file_menu.addAction("Quit", self.quit)
+        service_menu = self.menuBar().addMenu("&Service")
+        service_menu.addAction("Service tools...", self.open_service)
         help_menu = self.menuBar().addMenu("&Help")
         help_menu.addAction("Check for updates...", self.check_for_updates)
         self.auto_update_action = help_menu.addAction("Check for updates on startup")
@@ -486,6 +603,89 @@ class MainWindow(QMainWindow):
         self.auto_update_action.toggled.connect(lambda on: self.settings.setValue("auto_update_check", on))
         help_menu.addSeparator()
         help_menu.addAction("About", self.show_about)
+
+    # -- service ------------------------------------------------------------
+
+    def open_service(self) -> None:
+        remaining = self._service_locked_until - time.monotonic()
+        if remaining > 0:
+            QMessageBox.warning(self, "Service", f"Too many wrong passwords. Try again in {int(remaining) + 1} seconds.")
+            return
+        self.show_window()
+        password, ok = QInputDialog.getText(self, "Service", "Service password:", QLineEdit.EchoMode.Password)
+        if not ok:
+            return
+        stored = str(self.settings.value("service_password_hash", DEFAULT_PASSWORD_HASH))
+        if not verify_password(password, stored):
+            self._service_failures += 1
+            logging.warning("Service: wrong password")
+            if self._service_failures >= 3:
+                self._service_failures = 0
+                self._service_locked_until = time.monotonic() + 60
+            QMessageBox.warning(self, "Service", "Wrong password.")
+            return
+        self._service_failures = 0
+        logging.info("Service: menu opened")
+        ServiceDialog(self).exec()
+
+    def restart_service(self) -> None:
+        logging.info("Service: restarting print service")
+        self.start_server()
+
+    def reset_settings(self) -> None:
+        answer = QMessageBox.question(
+            self, "Reset settings",
+            "Reset all settings (port, paper, folders, forwarding, logo, updates) to their defaults?\n\n"
+            "Saved jobs and the service password are kept.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        password_hash = self.settings.value("service_password_hash")
+        self.settings.clear()
+        if password_hash:
+            self.settings.setValue("service_password_hash", password_hash)
+        self._load_settings()
+        self.auto_update_action.setChecked(True)
+        logging.info("Service: settings reset to defaults")
+        self.start_server()
+        self.refresh_jobs()
+
+    def change_service_password(self) -> None:
+        new, ok = QInputDialog.getText(self, "Change password", "New service password:", QLineEdit.EchoMode.Password)
+        if not ok:
+            return
+        if len(new) < 6:
+            QMessageBox.warning(self, "Change password", "The password must be at least 6 characters.")
+            return
+        again, ok = QInputDialog.getText(self, "Change password", "Repeat the new password:", QLineEdit.EchoMode.Password)
+        if not ok:
+            return
+        if new != again:
+            QMessageBox.warning(self, "Change password", "The passwords do not match.")
+            return
+        self.settings.setValue("service_password_hash", hash_password(new))
+        logging.info("Service: password changed")
+        QMessageBox.information(self, "Change password", "The service password has been changed.")
+
+    def copy_diagnostics(self) -> None:
+        import PySide6
+
+        build_date, commit = build_info()
+        lines = [
+            f"{APP_NAME} {__version__} (build {build_date}{' ' + commit if commit else ''})",
+            f"Python {platform.python_version()}, Qt {qVersion()}, PySide6 {PySide6.__version__}, {platform.platform()}",
+            f"Installed exe: {getattr(sys, 'frozen', False)}, app folder: {app_root()}",
+            f"Status: {self.status_label.text()}",
+            f"Paper: {self.paper_combo.currentData()} mm, idle timeout: {self.idle_spin.value()} s",
+            f"Forwarding: {self.active_forward_target()}",
+            f"Logo: {self._logo_settings()}",
+            f"Settings: {self.settings.fileName()}",
+        ]
+        for name, root in (("Receipts", self.output_dir), ("Misc", self.misc_dir)):
+            count, size = folder_usage(root)
+            lines.append(f"{name}: {root} ({count} files, {format_size(size)})")
+        QApplication.clipboard().setText("\n".join(lines))
+        QMessageBox.information(self, "Diagnostics", "Diagnostics copied to the clipboard.\n\n" + "\n".join(lines))
 
     # -- updates ------------------------------------------------------------
 
@@ -604,6 +804,7 @@ class MainWindow(QMainWindow):
         self.tray_toggle: QAction = menu.addAction("Stop printer", self.toggle_server)
         menu.addSeparator()
         menu.addAction("Check for updates...", self.check_for_updates)
+        menu.addAction("Service...", self.open_service)
         menu.addAction("About", self.show_about)
         menu.addAction("Quit", self.quit)
         self.tray.setContextMenu(menu)

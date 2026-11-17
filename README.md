@@ -63,6 +63,18 @@ uv run virtual-printer-gui --minimized  # start hidden in the tray
 - **Right-click** a job for: Preview, Reprint, Open final PDF, Open PDF as received, Open JSON, Copy JSON path, Show in folder.
 - **Reprint** sends the job's final bytes (with the logo it was printed with) to the printer set on the **Forwarding** tab. Older jobs without a final copy are reprinted as received.
 
+### Service menu
+
+**Service → Service tools...** (also **Service...** in the tray menu) opens the administrative tools after you enter the service password. Ask your administrator for it. After 3 wrong attempts the menu is locked for 60 seconds.
+
+| Section | Tools |
+| --- | --- |
+| Print service | Restart, stop or start the print service; shows its current status |
+| Storage | File count and size of the `receipts` and `misc` folders; **Empty** either one, or delete jobs **older than N days** from both. Only job files are deleted; the folder structure is kept, and every deletion asks for confirmation. |
+| Maintenance | **Clear log**, **Copy diagnostics** (version, paths, settings and folder sizes, for support), **Reset settings** to defaults (jobs and password are kept), **Change password** |
+
+The password is stored only as a salted PBKDF2-SHA256 hash. A changed password is saved in the user's settings. The menu prevents casual changes by staff; it is not protection against someone with full access to the computer.
+
 ### Updates
 
 The app checks [GitHub Releases](https://github.com/Bikitsos/swift-virtual-printer/releases) for a newer version 5 seconds after it starts. Turn this off under **Help → Check for updates on startup**. When an update is found, a tray notification appears; click it to see what's new. To check by hand, use **Help → Check for updates...** or the tray menu.
