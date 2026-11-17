@@ -444,6 +444,11 @@ class MainWindow(QMainWindow):
         self.idle_spin.setSuffix(" s")
         self.auto_cut_check = QCheckBox("Add a paper cut when the document has none")
         self.auto_cut_check.setToolTip("Appends an ESC/POS cut (GS V 66 0: feed to cutter, partial cut) to jobs without a cut.")
+        self.clean_check = QCheckBox("Reset the printer before each job and finish an unprinted last line")
+        self.clean_check.setToolTip(
+            "Prepends ESC @ and adds a final line feed when needed. Fixes jobs from plain-text drivers "
+            "(e.g. Windows 'Generic / Text Only' test pages) that don't cut and disturb the next receipt."
+        )
 
         form = QFormLayout()
         form.addRow("Listen address", self.host_edit)
@@ -452,6 +457,7 @@ class MainWindow(QMainWindow):
         form.addRow("Receipts folder", output_row)
         form.addRow("Idle timeout", self.idle_spin)
         form.addRow("Paper cut", self.auto_cut_check)
+        form.addRow("Clean up jobs", self.clean_check)
 
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -680,7 +686,7 @@ class MainWindow(QMainWindow):
             f"Installed exe: {getattr(sys, 'frozen', False)}, app folder: {app_root()}",
             f"Status: {self.status_label.text()}",
             f"Paper: {self.paper_combo.currentData()} mm, idle timeout: {self.idle_spin.value()} s, "
-            f"auto cut: {self.auto_cut_check.isChecked()}",
+            f"auto cut: {self.auto_cut_check.isChecked()}, clean up jobs: {self.clean_check.isChecked()}",
             f"Forwarding: {self.active_forward_target()}",
             f"Logo: {self._logo_settings()}",
             f"Settings: {self.settings.fileName()}",
@@ -826,6 +832,7 @@ class MainWindow(QMainWindow):
         self.output_edit.setText(str(s.value("receipts_dir", str(DEFAULT_OUTPUT))))
         self.idle_spin.setValue(float(s.value("idle_timeout", 10.0)))
         self.auto_cut_check.setChecked(s.value("auto_cut", False, type=bool))
+        self.clean_check.setChecked(s.value("clean_jobs", True, type=bool))
         self.forward_mode.setCurrentIndex(max(0, self.forward_mode.findData(str(s.value("forward_mode", OFF)))))
         self.forward_host.setText(str(s.value("forward_host", "")))
         self.forward_port.setValue(int(s.value("forward_port", 9100)))
@@ -845,6 +852,7 @@ class MainWindow(QMainWindow):
         s.setValue("receipts_dir", self.output_edit.text().strip())
         s.setValue("idle_timeout", self.idle_spin.value())
         s.setValue("auto_cut", self.auto_cut_check.isChecked())
+        s.setValue("clean_jobs", self.clean_check.isChecked())
         s.setValue("forward_mode", self.forward_mode.currentData())
         s.setValue("forward_host", self.forward_host.text().strip())
         s.setValue("forward_port", self.forward_port.value())
@@ -883,6 +891,7 @@ class MainWindow(QMainWindow):
             self._forward_target(),
             self._logo_settings(),
             self.auto_cut_check.isChecked(),
+            self.clean_check.isChecked(),
             parent=self,
         )
         try:

@@ -14,7 +14,7 @@ from . import APP_NAME, __version__
 from .classify import RECEIPT_MARKER, is_receipt, strip_marker
 from .escpos import Cut, EscPosParser, elements_to_lines
 from .forward import NETWORK, ForwardTarget, forward_async
-from .logo import LogoSettings, bitmap_to_escpos, inject, load_logo
+from .logo import ESC_INIT, LogoSettings, bitmap_to_escpos, inject, load_logo
 from .render import PdfRenderer
 
 log = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ class PrintServer(QObject):
         forward_target: ForwardTarget | None = None,
         logo: LogoSettings | None = None,
         auto_cut: bool = False,
+        clean_jobs: bool = True,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -58,6 +59,7 @@ class PrintServer(QObject):
         self.forward_target = forward_target or ForwardTarget()
         self.logo = logo or LogoSettings()
         self.auto_cut = auto_cut
+        self.clean_jobs = clean_jobs
         self._logo_bytes = b""
         self.renderer = PdfRenderer(paper_mm, paper_dots)
         self._counter = 0
@@ -161,17 +163,27 @@ class PrintServer(QObject):
         stem = f"job_{received:%Y%m%d_%H%M%S}_{self._counter:04d}"
         self._make_dirs()
 
-        received_elements = EscPosParser(self.paper_dots).parse(data)
+        received_parser = EscPosParser(self.paper_dots)
+        received_elements = received_parser.parse(data)
         receipt = is_receipt(elements_to_lines(received_elements))
         if receipt:
-            # Marked receipts: drop the marker line and add the logo.
+            # Marked receipts: drop the marker line (the logo is added below).
             root, category = self.output_dir, "receipt"
             printed = strip_marker(data)
-            if self._logo_bytes:
-                printed = inject(printed, self._logo_bytes)
         else:
             root, category = self.misc_dir, "misc"
             printed = data
+
+        # Jobs from plain-text drivers (e.g. Windows "Generic / Text Only") don't reset the printer and can
+        # leave the last line unprinted in its buffer, which then spoils the next job and blocks the cut.
+        reset_added = self.clean_jobs and not printed.startswith(ESC_INIT)
+        if reset_added:
+            printed = ESC_INIT + printed
+        if receipt and self._logo_bytes:
+            printed = inject(printed, self._logo_bytes)
+        line_end_added = self.clean_jobs and received_parser.unterminated
+        if line_end_added:
+            printed += b"\n"
         cut_added = self.auto_cut and not any(isinstance(e, Cut) for e in received_elements)
         if cut_added:
             printed += AUTO_CUT
@@ -206,6 +218,8 @@ class PrintServer(QObject):
                 },
                 "logo": Path(self.logo.path).name if receipt and self._logo_bytes else None,
                 "cut_added": cut_added,
+                "printer_reset_added": reset_added,
+                "line_end_added": line_end_added,
                 "line_count": len(lines),
                 "lines": {f"line_{i:03d}": text for i, text in enumerate(lines, 1)},
             }

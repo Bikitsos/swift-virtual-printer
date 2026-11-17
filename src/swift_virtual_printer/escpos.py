@@ -176,6 +176,9 @@ class EscPosParser:
     def parse(self, data: bytes) -> list[Element]:
         self._data = data
         self._pos = 0
+        # True while text sits in the printer's line buffer without LF/ESC d/ESC J to print it
+        # (FF doesn't count: real printers ignore it outside page mode).
+        self.unterminated = False
         try:
             while self._pos < len(data):
                 self._step(self._u8())
@@ -220,6 +223,7 @@ class EscPosParser:
             self._newline()
         self._line.append(item)
         self._line_width += width
+        self.unterminated = True
 
     def _add_char(self, char: str) -> None:
         self._add_item(TextCell(char, self.style))
@@ -243,6 +247,8 @@ class EscPosParser:
 
     def _step(self, b: int) -> None:
         if b in (LF, FF):
+            if b == LF:
+                self.unterminated = False
             self._newline()
         elif b == HT:
             cell_w = self.style.cell[0]
@@ -263,6 +269,7 @@ class EscPosParser:
         if c == 0x40:  # @ initialize
             self._flush()
             self._reset_state()
+            self.unterminated = False
         elif c in (0x45, 0x47):  # E / G bold, double-strike
             self.style = replace(self.style, bold=bool(self._u8() & 1))
         elif c == 0x2D:  # - underline
@@ -287,12 +294,14 @@ class EscPosParser:
             self.spacing = self._u8()
         elif c == 0x64:  # d print and feed n lines
             n = self._u8()
+            self.unterminated = False
             if self._line:
                 self._newline()
                 n -= 1
             if n > 0:
                 self.elements.append(Feed(n * self.spacing))
         elif c == 0x4A:  # J print and feed n dots
+            self.unterminated = False
             self._print_line(self._u8())
         elif c == 0x74:  # t code page
             self.codepage = CODEPAGES.get(self._u8(), "cp437")

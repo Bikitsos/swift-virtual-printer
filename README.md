@@ -17,6 +17,7 @@ Built with [PySide6](https://doc.qt.io/qtforpython/) and managed with [uv](https
 - Optional PNG/JPG logo printed at the top of every receipt, in the PDF and on the real printer
 - Sorts jobs: receipts marked with `-R-R-R-` get the logo and go to `receipts/`; everything else prints without the logo and goes to `misc/`
 - Optional automatic paper cut for documents that don't contain one (**Printer** tab → *Add a paper cut when the document has none*). It appends `GS V 66 0` (feed to the cutter, partial cut) to the final copy and the real printer, and records `"cut_added"` in the JSON.
+- Job clean-up, on by default (**Printer** tab → *Reset the printer before each job and finish an unprinted last line*). It prepends `ESC @` to every job and adds a line feed if the last line was never printed (for example a Windows *Generic / Text Only* test page that ends with a form feed). Without this, such a job leaves text stuck in the printer's buffer, the cut is ignored, and the next receipt prints wrong. Disable it with `--no-cleanup`.
 
 ### Supported ESC/POS commands
 
@@ -107,6 +108,7 @@ uv run virtual-printer [options]
 | `--logo-width` | `60` | Logo width as % of the paper width |
 | `--logo-dither` | off | Dither the logo (better for photos and gradients) |
 | `--auto-cut` | off | Add a paper cut to jobs that don't contain one |
+| `--no-cleanup` | | Don't reset the printer before each job or finish an unprinted last line |
 | `--forward-printer` | | Also send each job to an installed Windows printer (RAW); cannot be combined with `--forward-host` |
 
 Press `Ctrl+C` to stop.
