@@ -13,10 +13,10 @@ _ENCODINGS = ("cp437", "cp1252", "cp1253", "cp737", "utf-8")
 
 @dataclass(frozen=True)
 class ReceiptRule:
-    """A job is a receipt when its Nth printed text line matches the pattern."""
+    """A job is a receipt when its Nth printed text line (or any line) matches the pattern."""
 
     pattern: str = DEFAULT_MARKER
-    line: int = 1  # 1 = first printed text line; blank lines and images don't count
+    line: int = 1  # 1 = first printed text line, 0 = any line; blank lines and images don't count
     contains: bool = False  # False: the line must equal the pattern; True: the line contains it
     remove: bool = True  # remove the marker from what gets printed
 
@@ -24,16 +24,21 @@ class ReceiptRule:
         if not self.pattern:
             return "every job is a receipt"
         how = "contains" if self.contains else "is"
-        return f"text line {self.line} {how} {self.pattern!r}"
+        where = "any text line" if self.line == 0 else f"text line {self.line}"
+        return f"{where} {how} {self.pattern!r}"
+
+    def line_matches(self, text: str) -> bool:
+        return self.pattern in text if self.contains else text == self.pattern.strip()
 
     def matches(self, lines: list[str]) -> bool:
         if not self.pattern:
             return True
         text_lines = [t for t in (line.strip() for line in lines) if t and not t.startswith("[IMAGE")]
+        if self.line == 0:
+            return any(self.line_matches(text) for text in text_lines)
         if len(text_lines) < self.line:
             return False
-        text = text_lines[self.line - 1]
-        return self.pattern in text if self.contains else text == self.pattern.strip()
+        return self.line_matches(text_lines[self.line - 1])
 
     def strip(self, data: bytes) -> bytes:
         """Remove the marker; the whole line (with its line feed) goes if nothing else is printed on it."""

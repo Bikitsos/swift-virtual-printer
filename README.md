@@ -130,7 +130,7 @@ The POS marks real receipts with a marker text on a known line. The rule is set 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | Marker text | `-R-R-R-` | Text that identifies a receipt. Leave it empty to treat **every** job as a receipt. |
-| Look at | text line 1 | Which printed text line to check. Blank lines and images are not counted, so text line 1 is the first line with text. |
+| Look at | text line 1 | Which printed text line to check, or **any line** (anywhere in the job). Blank lines and images are not counted, so text line 1 is the first line with text. |
 | The line | is exactly the marker | Or *contains the marker*, when the marker is part of a longer line |
 | Remove the marker from the printout | on | The marker is removed from what's printed. The whole line goes when nothing else is printed on it. |
 
@@ -143,7 +143,7 @@ The POS marks real receipts with a marker text on a known line. The rule is set 
 
 Both kinds are forwarded to the real printer, shown in the jobs list (misc jobs are greyed and marked `(misc)`), and can be previewed and reprinted. The `misc` folder sits next to the `receipts` folder and has the same subfolders. The as-received copies in `bin/` and `pdf/` still contain the marker. Greek markers work with the Greek code pages (`ESC t` 14 / 15 / 47).
 
-On the command line: `--receipt-marker TEXT`, `--marker-line N`, `--marker-contains`, `--keep-marker`.
+On the command line: `--receipt-marker TEXT`, `--marker-line N` (`0` = any line), `--marker-contains`, `--keep-marker`.
 
 ## Saved receipts
 

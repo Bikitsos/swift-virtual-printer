@@ -491,8 +491,9 @@ class MainWindow(QMainWindow):
         self.marker_edit = QLineEdit()
         self.marker_edit.setPlaceholderText("empty = every job is a receipt")
         self.marker_line = QSpinBox()
-        self.marker_line.setRange(1, 50)
+        self.marker_line.setRange(0, 50)
         self.marker_line.setPrefix("text line ")
+        self.marker_line.setSpecialValueText("any line")
         self.marker_mode = QComboBox()
         self.marker_mode.addItem("is exactly the marker", False)
         self.marker_mode.addItem("contains the marker", True)
@@ -513,7 +514,7 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.addWidget(_hint(
-            "A job is a receipt when the chosen printed text line matches the marker. Blank lines and images "
+            "A job is a receipt when the chosen printed text line (or any line) matches the marker. Blank lines and images "
             "are not counted, so text line 1 is the first line with text. Receipts get the logo and go to the "
             "receipts folder; everything else goes to the misc folder without logo."
         ))
@@ -542,7 +543,12 @@ class MainWindow(QMainWindow):
         rule = self._receipt_rule()
         lines = elements_to_lines(EscPosParser(PAPER_SIZES[self.paper_combo.currentData()][1]).parse(job.bin.read_bytes()))
         text_lines = [t for t in (line.strip() for line in lines) if t and not t.startswith("[IMAGE")]
-        shown = "\n".join(f"{'>' if i == rule.line else ' '} {i:2}: {t}" for i, t in enumerate(text_lines[:8], 1))
+        limit = len(text_lines) if rule.line == 0 else 8
+
+        def checked(i: int, text: str) -> bool:
+            return rule.line_matches(text) if rule.line == 0 else i == rule.line
+
+        shown = "\n".join(f"{'>' if checked(i, t) else ' '} {i:2}: {t}" for i, t in enumerate(text_lines[:limit], 1))
         verdict = "RECEIPT (logo, receipts folder)" if rule.matches(lines) else "NOT a receipt (no logo, misc folder)"
         QMessageBox.information(
             self, "Test receipt rule", f"{job.stem}\nRule: {rule}\n\nResult: {verdict}\n\nFirst text lines:\n{shown}"

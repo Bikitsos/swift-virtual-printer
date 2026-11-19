@@ -32,7 +32,7 @@ def main() -> int:
     parser.add_argument("--auto-cut", action="store_true", help="add a paper cut to jobs that don't contain one")
     parser.add_argument("--no-cleanup", action="store_true", help="don't reset the printer before each job or finish an unterminated last line")
     parser.add_argument("--receipt-marker", default="-R-R-R-", metavar="TEXT", help="text that marks a job as a receipt; empty = every job (default: -R-R-R-)")
-    parser.add_argument("--marker-line", type=int, default=1, metavar="N", help="printed text line to check, 1 = first (default: 1)")
+    parser.add_argument("--marker-line", type=int, default=1, metavar="N", help="printed text line to check, 1 = first, 0 = any line (default: 1)")
     parser.add_argument("--marker-contains", action="store_true", help="the line only has to contain the marker instead of being equal to it")
     parser.add_argument("--keep-marker", action="store_true", help="don't remove the marker from the printout")
     args = parser.parse_args()
@@ -61,7 +61,7 @@ def main() -> int:
         target = ForwardTarget()
 
     logo = LogoSettings(args.logo or "", max(10, min(100, args.logo_width)), args.logo_dither)
-    rule = ReceiptRule(args.receipt_marker, max(1, args.marker_line), args.marker_contains, not args.keep_marker)
+    rule = ReceiptRule(args.receipt_marker, max(0, args.marker_line), args.marker_contains, not args.keep_marker)
     paper_mm, paper_dots = PAPER_SIZES[args.paper]
     server = PrintServer(
         args.host, args.port, args.output or default_receipts_dir(), paper_mm, paper_dots, args.idle_timeout,
