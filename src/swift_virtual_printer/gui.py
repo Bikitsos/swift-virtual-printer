@@ -48,12 +48,12 @@ from PySide6.QtWidgets import (
 from . import APP_NAME, COMPANY, CREDITS, __version__, app_root, build_info, default_receipts_dir
 from .admin import DEFAULT_PASSWORD_HASH, delete_job_files, folder_usage, format_size, hash_password, verify_password
 from .escpos import EscPosParser, elements_to_lines
-from .classify import DEFAULT_MARKER, ReceiptRule
+from .classify import DEFAULT_MARKER, DEFAULT_ZREPORT_MARKER, ReceiptRule
 from .forward import NETWORK, OFF, WINDOWS, ForwardTarget, forward_async, list_windows_printers
 from .logo import LogoSettings, load_logo
 from .render import PdfRenderer, bitmap_to_qimage
 from .main import PAPER_SIZES
-from .server import PrintServer, misc_dir_for
+from .server import PrintServer, misc_dir_for, zreports_dir_for
 from .printer_status import PrinterStatus, check_status
 from .updater import Release, UpdateChecker, UpdateDownloader, can_self_update, is_newer, run_installer
 
@@ -245,23 +245,20 @@ class ServiceDialog(QDialog):
         service_layout.addWidget(self.status)
         service_layout.addLayout(service_buttons)
 
-        self.receipts_usage = QLabel()
-        self.misc_usage = QLabel()
-        empty_receipts = QPushButton("Empty...")
-        empty_receipts.clicked.connect(lambda: self._delete([(window.output_dir, "receipts")]))
-        empty_misc = QPushButton("Empty...")
-        empty_misc.clicked.connect(lambda: self._delete([(window.misc_dir, "misc")]))
+        storage = QFormLayout()
+        self.usage_labels: dict[str, QLabel] = {}
+        for name, root in window.job_roots:
+            label = QLabel()
+            empty = QPushButton("Empty...")
+            empty.clicked.connect(lambda _=False, r=root, n=name: self._delete([(r, n)]))
+            self.usage_labels[name] = label
+            storage.addRow(name.capitalize() if name != "zreports" else "Z reports", self._row(label, empty))
         self.days = QSpinBox()
         self.days.setRange(1, 3650)
         self.days.setValue(30)
         self.days.setSuffix(" days")
         delete_old = QPushButton("Delete...")
-        delete_old.clicked.connect(
-            lambda: self._delete([(window.output_dir, "receipts"), (window.misc_dir, "misc")], self.days.value())
-        )
-        storage = QFormLayout()
-        storage.addRow("Receipts", self._row(self.receipts_usage, empty_receipts))
-        storage.addRow("Misc", self._row(self.misc_usage, empty_misc))
+        delete_old.clicked.connect(lambda: self._delete([(r, n) for n, r in window.job_roots], self.days.value()))
         older = QHBoxLayout()
         older.addWidget(QLabel("Jobs older than"))
         older.addWidget(self.days)
@@ -304,9 +301,9 @@ class ServiceDialog(QDialog):
 
     def refresh(self) -> None:
         self.status.setText(self._window.status_label.text())
-        for label, root in ((self.receipts_usage, self._window.output_dir), (self.misc_usage, self._window.misc_dir)):
+        for name, root in self._window.job_roots:
             count, size = folder_usage(root)
-            label.setText(f"{count} files, {format_size(size)}  -  {root}")
+            self.usage_labels[name].setText(f"{count} files, {format_size(size)}  -  {root}")
 
     def _delete(self, roots: list[tuple[Path, str]], older_than_days: int | None = None) -> None:
         usage = [(root, name, *folder_usage(root, older_than_days)) for root, name in roots]
@@ -399,6 +396,8 @@ class MainWindow(QMainWindow):
         open_folder.clicked.connect(self.open_output_folder)
         open_misc = QPushButton("Misc folder")
         open_misc.clicked.connect(self.open_misc_folder)
+        open_zreports = QPushButton("Z reports")
+        open_zreports.clicked.connect(self.open_zreports_folder)
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(self.refresh_jobs)
         jobs_buttons = QHBoxLayout()
@@ -406,6 +405,7 @@ class MainWindow(QMainWindow):
         jobs_buttons.addWidget(refresh)
         jobs_buttons.addWidget(open_folder)
         jobs_buttons.addWidget(open_misc)
+        jobs_buttons.addWidget(open_zreports)
         jobs_box = QGroupBox("Jobs")
         jobs_layout = QVBoxLayout(jobs_box)
         jobs_layout.addWidget(self.jobs_list)
@@ -487,26 +487,42 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return page
 
+    @staticmethod
+    def _rule_widgets(placeholder: str) -> tuple[QLineEdit, QSpinBox, QComboBox, QCheckBox, QFormLayout]:
+        edit = QLineEdit()
+        edit.setPlaceholderText(placeholder)
+        line = QSpinBox()
+        line.setRange(0, 50)
+        line.setPrefix("text line ")
+        line.setSpecialValueText("any line")
+        mode = QComboBox()
+        mode.addItem("is exactly the marker", False)
+        mode.addItem("contains the marker", True)
+        remove = QCheckBox("Remove the marker from the printout")
+        remove.setToolTip("The whole line is removed when nothing else is printed on it.")
+        form = QFormLayout()
+        form.addRow("Marker text", edit)
+        form.addRow("Look at", line)
+        form.addRow("The line", mode)
+        form.addRow("", remove)
+        return edit, line, mode, remove, form
+
     def _build_receipt_tab(self) -> QWidget:
-        self.marker_edit = QLineEdit()
-        self.marker_edit.setPlaceholderText("empty = every job is a receipt")
-        self.marker_line = QSpinBox()
-        self.marker_line.setRange(0, 50)
-        self.marker_line.setPrefix("text line ")
-        self.marker_line.setSpecialValueText("any line")
-        self.marker_mode = QComboBox()
-        self.marker_mode.addItem("is exactly the marker", False)
-        self.marker_mode.addItem("contains the marker", True)
-        self.marker_remove = QCheckBox("Remove the marker from the printout")
-        self.marker_remove.setToolTip("The whole line is removed when nothing else is printed on it.")
+        self.marker_edit, self.marker_line, self.marker_mode, self.marker_remove, receipt_form = self._rule_widgets(
+            "empty = every job is a receipt"
+        )
+        receipt_box = QGroupBox("Receipts: logo added, saved in the receipts folder")
+        receipt_box.setLayout(receipt_form)
+
+        self.zreport_box = QGroupBox("Detect Z reports: no logo, saved in the zreports folder")
+        self.zreport_box.setCheckable(True)
+        self.zreport_edit, self.zreport_line, self.zreport_mode, self.zreport_remove, zreport_form = self._rule_widgets(
+            "e.g. Z REPORT"
+        )
+        self.zreport_box.setLayout(zreport_form)
+
         test = QPushButton("Test on selected job")
         test.clicked.connect(self.test_receipt_rule)
-
-        form = QFormLayout()
-        form.addRow("Marker text", self.marker_edit)
-        form.addRow("Look at", self.marker_line)
-        form.addRow("The line", self.marker_mode)
-        form.addRow("", self.marker_remove)
         test_row = QHBoxLayout()
         test_row.addStretch(1)
         test_row.addWidget(test)
@@ -514,11 +530,12 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.addWidget(_hint(
-            "A job is a receipt when the chosen printed text line (or any line) matches the marker. Blank lines and images "
-            "are not counted, so text line 1 is the first line with text. Receipts get the logo and go to the "
-            "receipts folder; everything else goes to the misc folder without logo."
+            "A job matches when the chosen printed text line (or any line) matches the marker. Blank lines and "
+            "images are not counted, so text line 1 is the first line with text. Z reports are checked first; "
+            "jobs that are neither go to the misc folder without logo."
         ))
-        layout.addLayout(form)
+        layout.addWidget(receipt_box)
+        layout.addWidget(self.zreport_box)
         layout.addLayout(test_row)
         layout.addStretch(1)
         return page
@@ -531,27 +548,49 @@ class MainWindow(QMainWindow):
             self.marker_remove.isChecked(),
         )
 
+    def _zreport_rule(self) -> ReceiptRule | None:
+        if not self.zreport_box.isChecked() or not self.zreport_edit.text().strip():
+            return None
+        return ReceiptRule(
+            self.zreport_edit.text(),
+            self.zreport_line.value(),
+            bool(self.zreport_mode.currentData()),
+            self.zreport_remove.isChecked(),
+        )
+
     def test_receipt_rule(self) -> None:
         item = self.jobs_list.currentItem()
         if item is None:
-            QMessageBox.information(self, "Test receipt rule", "Select a job in the jobs list first.")
+            QMessageBox.information(self, "Test rules", "Select a job in the jobs list first.")
             return
         job = self._job_at(item)
         if not job.bin.exists():
-            QMessageBox.warning(self, "Test receipt rule", f"No received data saved for {job.stem}.")
+            QMessageBox.warning(self, "Test rules", f"No received data saved for {job.stem}.")
             return
-        rule = self._receipt_rule()
+        receipt_rule, zreport_rule = self._receipt_rule(), self._zreport_rule()
         lines = elements_to_lines(EscPosParser(PAPER_SIZES[self.paper_combo.currentData()][1]).parse(job.bin.read_bytes()))
         text_lines = [t for t in (line.strip() for line in lines) if t and not t.startswith("[IMAGE")]
-        limit = len(text_lines) if rule.line == 0 else 8
 
-        def checked(i: int, text: str) -> bool:
+        def checked(rule: ReceiptRule | None, i: int, text: str) -> bool:
+            if rule is None or not rule.pattern:
+                return False
             return rule.line_matches(text) if rule.line == 0 else i == rule.line
 
-        shown = "\n".join(f"{'>' if checked(i, t) else ' '} {i:2}: {t}" for i, t in enumerate(text_lines[:limit], 1))
-        verdict = "RECEIPT (logo, receipts folder)" if rule.matches(lines) else "NOT a receipt (no logo, misc folder)"
+        def mark(i: int, text: str) -> str:
+            return ("Z" if checked(zreport_rule, i, text) else " ") + (">" if checked(receipt_rule, i, text) else " ")
+
+        any_line = receipt_rule.line == 0 or (zreport_rule is not None and zreport_rule.line == 0)
+        limit = len(text_lines) if any_line else 8
+        shown = "\n".join(f"{mark(i, t)} {i:2}: {t}" for i, t in enumerate(text_lines[:limit], 1))
+        if zreport_rule and zreport_rule.matches(lines):
+            verdict = "Z REPORT (no logo, zreports folder)"
+        elif receipt_rule.matches(lines):
+            verdict = "RECEIPT (logo, receipts folder)"
+        else:
+            verdict = "Other document (no logo, misc folder)"
+        rules = f"Receipt rule (>): {receipt_rule}\nZ report rule (Z): {zreport_rule or 'off'}"
         QMessageBox.information(
-            self, "Test receipt rule", f"{job.stem}\nRule: {rule}\n\nResult: {verdict}\n\nFirst text lines:\n{shown}"
+            self, "Test rules", f"{job.stem}\n{rules}\n\nResult: {verdict}\n\nText lines:\n{shown}"
         )
 
     def _build_forward_tab(self) -> QWidget:
@@ -700,6 +739,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction("Open receipts folder", self.open_output_folder)
         file_menu.addAction("Open misc folder", self.open_misc_folder)
+        file_menu.addAction("Open Z reports folder", self.open_zreports_folder)
         file_menu.addSeparator()
         file_menu.addAction("Quit", self.quit)
         service_menu = self.menuBar().addMenu("&Service")
@@ -788,13 +828,14 @@ class MainWindow(QMainWindow):
             f"Paper: {self.paper_combo.currentData()} mm, idle timeout: {self.idle_spin.value()} s, "
             f"auto cut: {self.auto_cut_check.isChecked()}, clean up jobs: {self.clean_check.isChecked()}",
             f"Receipt rule: {self._receipt_rule()} (remove marker: {self.marker_remove.isChecked()})",
+            f"Z report rule: {self._zreport_rule() or 'off'}",
             f"Forwarding: {self.active_forward_target()}",
             f"Logo: {self._logo_settings()}",
             f"Settings: {self.settings.fileName()}",
         ]
-        for name, root in (("Receipts", self.output_dir), ("Misc", self.misc_dir)):
+        for name, root in self.job_roots:
             count, size = folder_usage(root)
-            lines.append(f"{name}: {root} ({count} files, {format_size(size)})")
+            lines.append(f"{name.capitalize()}: {root} ({count} files, {format_size(size)})")
         QApplication.clipboard().setText("\n".join(lines))
         QMessageBox.information(self, "Diagnostics", "Diagnostics copied to the clipboard.\n\n" + "\n".join(lines))
 
@@ -911,6 +952,7 @@ class MainWindow(QMainWindow):
         menu.addAction("Preview last job", self.preview_last_job)
         menu.addAction("Open receipts folder", self.open_output_folder)
         menu.addAction("Open misc folder", self.open_misc_folder)
+        menu.addAction("Open Z reports folder", self.open_zreports_folder)
         menu.addSeparator()
         self.tray_toggle: QAction = menu.addAction("Stop printer", self.toggle_server)
         menu.addSeparator()
@@ -948,6 +990,11 @@ class MainWindow(QMainWindow):
         self.marker_line.setValue(int(s.value("marker_line", 1)))
         self.marker_mode.setCurrentIndex(1 if s.value("marker_contains", False, type=bool) else 0)
         self.marker_remove.setChecked(s.value("marker_remove", True, type=bool))
+        self.zreport_box.setChecked(s.value("zreport_enabled", True, type=bool))
+        self.zreport_edit.setText(str(s.value("zreport_pattern", DEFAULT_ZREPORT_MARKER)))
+        self.zreport_line.setValue(int(s.value("zreport_line", 0)))
+        self.zreport_mode.setCurrentIndex(1 if s.value("zreport_contains", True, type=bool) else 0)
+        self.zreport_remove.setChecked(s.value("zreport_remove", False, type=bool))
         self._update_logo_preview()
 
     def _save_settings(self) -> None:
@@ -972,6 +1019,11 @@ class MainWindow(QMainWindow):
         s.setValue("marker_line", self.marker_line.value())
         s.setValue("marker_contains", bool(self.marker_mode.currentData()))
         s.setValue("marker_remove", self.marker_remove.isChecked())
+        s.setValue("zreport_enabled", self.zreport_box.isChecked())
+        s.setValue("zreport_pattern", self.zreport_edit.text())
+        s.setValue("zreport_line", self.zreport_line.value())
+        s.setValue("zreport_contains", bool(self.zreport_mode.currentData()))
+        s.setValue("zreport_remove", self.zreport_remove.isChecked())
 
     def _browse_output(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Receipts folder", self.output_edit.text())
@@ -1004,6 +1056,7 @@ class MainWindow(QMainWindow):
             self.auto_cut_check.isChecked(),
             self.clean_check.isChecked(),
             self._receipt_rule(),
+            self._zreport_rule(),
             parent=self,
         )
         try:
@@ -1055,12 +1108,14 @@ class MainWindow(QMainWindow):
         return item.data(Qt.ItemDataRole.UserRole)
 
     def _add_job_item(self, job: Job, top: bool = False) -> None:
-        is_misc = job.root == self.misc_dir
-        item = QListWidgetItem(f"{job.stem}    (misc)" if is_misc else job.stem)
+        tag = {self.misc_dir: "    (misc)", self.zreports_dir: "    (Z report)"}.get(job.root, "")
+        item = QListWidgetItem(job.stem + tag)
         item.setData(Qt.ItemDataRole.UserRole, job)
         item.setToolTip(str(job.best_pdf))
-        if is_misc:
+        if job.root == self.misc_dir:
             item.setForeground(QColor("#777777"))
+        elif job.root == self.zreports_dir:
+            item.setForeground(QColor("#1565c0"))
         if top:
             self.jobs_list.insertItem(0, item)
         else:
@@ -1069,7 +1124,7 @@ class MainWindow(QMainWindow):
     def refresh_jobs(self) -> None:
         self.jobs_list.clear()
         found: dict[Job, float] = {}
-        for root in (self.output_dir, self.misc_dir):
+        for _, root in self.job_roots:
             for folder in ("pdf", "final"):
                 directory = root / folder
                 if directory.is_dir():
@@ -1087,7 +1142,7 @@ class MainWindow(QMainWindow):
         self.last_job = job
         self._tray_click = self.preview_last_job
         self._add_job_item(job, top=True)
-        kind = "Document (misc)" if job.root == self.misc_dir else "Receipt"
+        kind = {self.misc_dir: "Document (misc)", self.zreports_dir: "Z report"}.get(job.root, "Receipt")
         self.tray.showMessage(f"{kind} received", f"{path.stem}\nClick to preview.", QSystemTrayIcon.MessageIcon.Information, 4000)
 
     def _open_path(self, path: str | Path) -> None:
@@ -1203,6 +1258,18 @@ class MainWindow(QMainWindow):
     def open_misc_folder(self) -> None:
         self.misc_dir.mkdir(parents=True, exist_ok=True)
         self._open_path(self.misc_dir)
+
+    def open_zreports_folder(self) -> None:
+        self.zreports_dir.mkdir(parents=True, exist_ok=True)
+        self._open_path(self.zreports_dir)
+
+    @property
+    def zreports_dir(self) -> Path:
+        return zreports_dir_for(self.output_dir)
+
+    @property
+    def job_roots(self) -> list[tuple[str, Path]]:
+        return [("receipts", self.output_dir), ("zreports", self.zreports_dir), ("misc", self.misc_dir)]
 
     @property
     def misc_dir(self) -> Path:

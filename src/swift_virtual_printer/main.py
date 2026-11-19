@@ -35,6 +35,9 @@ def main() -> int:
     parser.add_argument("--marker-line", type=int, default=1, metavar="N", help="printed text line to check, 1 = first, 0 = any line (default: 1)")
     parser.add_argument("--marker-contains", action="store_true", help="the line only has to contain the marker instead of being equal to it")
     parser.add_argument("--keep-marker", action="store_true", help="don't remove the marker from the printout")
+    parser.add_argument("--zreport-marker", default="Z REPORT", metavar="TEXT", help="text that marks a Z report; empty = don't detect (default: Z REPORT)")
+    parser.add_argument("--zreport-line", type=int, default=0, metavar="N", help="text line to check for the Z report marker, 0 = any line (default: 0)")
+    parser.add_argument("--zreport-exact", action="store_true", help="the line must equal the Z report marker instead of containing it")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -62,10 +65,11 @@ def main() -> int:
 
     logo = LogoSettings(args.logo or "", max(10, min(100, args.logo_width)), args.logo_dither)
     rule = ReceiptRule(args.receipt_marker, max(0, args.marker_line), args.marker_contains, not args.keep_marker)
+    zreport_rule = ReceiptRule(args.zreport_marker, max(0, args.zreport_line), not args.zreport_exact, remove=False)
     paper_mm, paper_dots = PAPER_SIZES[args.paper]
     server = PrintServer(
         args.host, args.port, args.output or default_receipts_dir(), paper_mm, paper_dots, args.idle_timeout,
-        target, logo, args.auto_cut, not args.no_cleanup, rule,
+        target, logo, args.auto_cut, not args.no_cleanup, rule, zreport_rule,
     )
     try:
         server.start()

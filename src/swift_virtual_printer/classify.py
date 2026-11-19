@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from .escpos import EscPosParser, elements_to_lines
 
 DEFAULT_MARKER = "-R-R-R-"
+DEFAULT_ZREPORT_MARKER = "Z REPORT"
 # Code pages tried when looking for the marker text in the raw job bytes.
 _ENCODINGS = ("cp437", "cp1252", "cp1253", "cp737", "utf-8")
 
@@ -22,7 +23,7 @@ class ReceiptRule:
 
     def __str__(self) -> str:
         if not self.pattern:
-            return "every job is a receipt"
+            return "every job"
         how = "contains" if self.contains else "is"
         where = "any text line" if self.line == 0 else f"text line {self.line}"
         return f"{where} {how} {self.pattern!r}"

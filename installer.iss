@@ -53,6 +53,11 @@ Name: "{app}\misc\bin"; Flags: uninsneveruninstall
 Name: "{app}\misc\pdf"; Flags: uninsneveruninstall
 Name: "{app}\misc\json"; Flags: uninsneveruninstall
 Name: "{app}\misc\final"; Flags: uninsneveruninstall
+Name: "{app}\zreports"; Permissions: users-modify; Flags: uninsneveruninstall
+Name: "{app}\zreports\bin"; Flags: uninsneveruninstall
+Name: "{app}\zreports\pdf"; Flags: uninsneveruninstall
+Name: "{app}\zreports\json"; Flags: uninsneveruninstall
+Name: "{app}\zreports\final"; Flags: uninsneveruninstall
 
 [InstallDelete]
 ; Drop files from the previous version (and the old one-file exe layout) before copying the new ones.

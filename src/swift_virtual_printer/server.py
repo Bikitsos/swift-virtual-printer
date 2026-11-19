@@ -32,6 +32,11 @@ def misc_dir_for(receipts_dir: Path) -> Path:
     return receipts_dir.parent / "misc"
 
 
+def zreports_dir_for(receipts_dir: Path) -> Path:
+    """Z reports go to a `zreports` folder next to the receipts folder."""
+    return receipts_dir.parent / "zreports"
+
+
 class PrintServer(QObject):
     job_saved = Signal(Path)
 
@@ -48,6 +53,7 @@ class PrintServer(QObject):
         auto_cut: bool = False,
         clean_jobs: bool = True,
         receipt_rule: ReceiptRule | None = None,
+        zreport_rule: ReceiptRule | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -62,6 +68,8 @@ class PrintServer(QObject):
         self.auto_cut = auto_cut
         self.clean_jobs = clean_jobs
         self.receipt_rule = receipt_rule or ReceiptRule()
+        # None (or an empty pattern) disables Z report detection.
+        self.zreport_rule = zreport_rule if zreport_rule and zreport_rule.pattern else None
         self._logo_bytes = b""
         self.renderer = PdfRenderer(paper_mm, paper_dots)
         self._counter = 0
@@ -83,6 +91,8 @@ class PrintServer(QObject):
             raise RuntimeError(f"Cannot listen on {self.host}:{self.port}: {self._server.errorString()}")
         log.info("Listening on %s:%d, saving receipts to %s", self.host, self.port, self.output_dir.resolve())
         log.info("Receipt rule: %s; other jobs are saved to %s without logo", self.receipt_rule, self.misc_dir.resolve())
+        if self.zreport_rule:
+            log.info("Z report rule: %s; saved to %s without logo", self.zreport_rule, self.zreports_dir.resolve())
         if self.forward_target.enabled:
             log.info("Forwarding jobs to %s", self.forward_target)
         if self.auto_cut:
@@ -92,8 +102,12 @@ class PrintServer(QObject):
     def misc_dir(self) -> Path:
         return misc_dir_for(self.output_dir)
 
+    @property
+    def zreports_dir(self) -> Path:
+        return zreports_dir_for(self.output_dir)
+
     def _make_dirs(self) -> None:
-        for root in (self.output_dir, self.misc_dir):
+        for root in (self.output_dir, self.misc_dir, self.zreports_dir):
             for name in SUBFOLDERS:
                 (root / name).mkdir(parents=True, exist_ok=True)
 
@@ -167,9 +181,17 @@ class PrintServer(QObject):
 
         received_parser = EscPosParser(self.paper_dots)
         received_elements = received_parser.parse(data)
-        receipt = self.receipt_rule.matches(elements_to_lines(received_elements))
-        if receipt:
+        received_lines = elements_to_lines(received_elements)
+        receipt = False
+        if self.zreport_rule and self.zreport_rule.matches(received_lines):
+            # Z reports are checked first and never get the logo.
+            root, category = self.zreports_dir, "zreport"
+            printed = self.zreport_rule.strip(data)
+            if self.receipt_rule.pattern and self.receipt_rule.matches(received_lines):
+                printed = self.receipt_rule.strip(printed)
+        elif self.receipt_rule.matches(received_lines):
             # Marked receipts: drop the marker line (the logo is added below).
+            receipt = True
             root, category = self.output_dir, "receipt"
             printed = self.receipt_rule.strip(data)
         else:
@@ -229,7 +251,8 @@ class PrintServer(QObject):
 
             self.renderer.render(received_elements, pdf_path)
             if self.renderer.render(elements, final_pdf):
-                log.info("%s from %s (%d bytes) -> %s", category.capitalize(), peer, len(data), stem)
+                label = {"receipt": "Receipt", "zreport": "Z report"}.get(category, "Document")
+                log.info("%s from %s (%d bytes) -> %s", label, peer, len(data), stem)
                 self.job_saved.emit(final_pdf)
             else:
                 log.info("Job from %s (%d bytes) had nothing printable", peer, len(data))
