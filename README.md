@@ -15,7 +15,7 @@ Built with [PySide6](https://doc.qt.io/qtforpython/) and managed with [uv](https
 - Preview any job in the app and reprint it to the real printer
 - Optionally forwards each job's original bytes to a real printer (network raw TCP or an installed Windows printer)
 - Optional PNG/JPG logo printed at the top of every receipt, in the PDF and on the real printer
-- Sorts jobs: receipts marked with `-R-R-R-` get the logo and go to `receipts/`; everything else prints without the logo and goes to `misc/`
+- Sorts jobs: receipts matching a configurable marker (default `-R-R-R-` on the first text line) get the logo and go to `receipts/`; everything else prints without the logo and goes to `misc/`
 - Optional automatic paper cut for documents that don't contain one (**Printer** tab → *Add a paper cut when the document has none*). It appends `GS V 66 0` (feed to the cutter, partial cut) to the final copy and the real printer, and records `"cut_added"` in the JSON.
 - Job clean-up, on by default (**Printer** tab → *Reset the printer before each job and finish an unprinted last line*). It prepends `ESC @` to every job and adds a line feed if the last line was never printed (for example a Windows *Generic / Text Only* test page that ends with a form feed). Without this, such a job leaves text stuck in the printer's buffer, the cut is ignored, and the next receipt prints wrong. Disable it with `--no-cleanup`.
 
@@ -125,14 +125,25 @@ This sends a sample receipt with styled text, an image, a CODE128 barcode, a QR 
 
 ## Receipts and other documents
 
-The POS marks real receipts by printing `-R-R-R-` as the **first line**. Blank lines and images before it are ignored.
+The POS marks real receipts with a marker text on a known line. The rule is set on the **Receipts** tab:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| Marker text | `-R-R-R-` | Text that identifies a receipt. Leave it empty to treat **every** job as a receipt. |
+| Look at | text line 1 | Which printed text line to check. Blank lines and images are not counted, so text line 1 is the first line with text. |
+| The line | is exactly the marker | Or *contains the marker*, when the marker is part of a longer line |
+| Remove the marker from the printout | on | The marker is removed from what's printed. The whole line goes when nothing else is printed on it. |
+
+**Test on selected job** checks the rule against a job selected in the jobs list. It shows whether the job would count as a receipt and lists its first text lines, with the checked line highlighted.
 
 | Job | What happens | Saved in |
 | --- | --- | --- |
-| First line is `-R-R-R-` | The marker line is removed and the [logo](#logo) is added. This is what's printed and saved as final. | `receipts/` |
+| Matches the rule | The marker is removed (if enabled) and the [logo](#logo) is added. This is what's printed and saved as final. | `receipts/` |
 | Anything else (reports, kitchen tickets, test pages...) | Printed exactly as received, **without** the logo | `misc/` |
 
-Both kinds are forwarded to the real printer, shown in the jobs list (misc jobs are greyed and marked `(misc)`), and can be previewed and reprinted. The `misc` folder sits next to the `receipts` folder and has the same subfolders. The as-received copies in `bin/` and `pdf/` still contain the marker line.
+Both kinds are forwarded to the real printer, shown in the jobs list (misc jobs are greyed and marked `(misc)`), and can be previewed and reprinted. The `misc` folder sits next to the `receipts` folder and has the same subfolders. The as-received copies in `bin/` and `pdf/` still contain the marker. Greek markers work with the Greek code pages (`ESC t` 14 / 15 / 47).
+
+On the command line: `--receipt-marker TEXT`, `--marker-line N`, `--marker-contains`, `--keep-marker`.
 
 ## Saved receipts
 

@@ -47,7 +47,8 @@ from PySide6.QtWidgets import (
 
 from . import APP_NAME, COMPANY, CREDITS, __version__, app_root, build_info, default_receipts_dir
 from .admin import DEFAULT_PASSWORD_HASH, delete_job_files, folder_usage, format_size, hash_password, verify_password
-from .escpos import EscPosParser
+from .escpos import EscPosParser, elements_to_lines
+from .classify import DEFAULT_MARKER, ReceiptRule
 from .forward import NETWORK, OFF, WINDOWS, ForwardTarget, forward_async, list_windows_printers
 from .logo import LogoSettings, load_logo
 from .render import PdfRenderer, bitmap_to_qimage
@@ -369,6 +370,7 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         tabs = QTabWidget()
         tabs.addTab(self._build_printer_tab(), "Printer")
+        tabs.addTab(self._build_receipt_tab(), "Receipts")
         tabs.addTab(self._build_forward_tab(), "Forwarding")
         tabs.addTab(self._build_logo_tab(), "Logo")
         self.paper_combo.currentIndexChanged.connect(self._update_logo_preview)
@@ -477,13 +479,74 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.addWidget(_hint(
-            "POS software prints to this address and port. Jobs whose first line is -R-R-R- are receipts: "
-            "the marker line is removed, the logo is added and they are saved in the receipts folder. "
-            "All other documents are printed without logo and saved in the misc folder next to it."
+            "POS software prints to this address and port. Receipts (see the Receipts tab) get the logo and are "
+            "saved in the receipts folder; all other documents are printed without logo and saved in the misc "
+            "folder next to it."
         ))
         layout.addLayout(form)
         layout.addStretch(1)
         return page
+
+    def _build_receipt_tab(self) -> QWidget:
+        self.marker_edit = QLineEdit()
+        self.marker_edit.setPlaceholderText("empty = every job is a receipt")
+        self.marker_line = QSpinBox()
+        self.marker_line.setRange(1, 50)
+        self.marker_line.setPrefix("text line ")
+        self.marker_mode = QComboBox()
+        self.marker_mode.addItem("is exactly the marker", False)
+        self.marker_mode.addItem("contains the marker", True)
+        self.marker_remove = QCheckBox("Remove the marker from the printout")
+        self.marker_remove.setToolTip("The whole line is removed when nothing else is printed on it.")
+        test = QPushButton("Test on selected job")
+        test.clicked.connect(self.test_receipt_rule)
+
+        form = QFormLayout()
+        form.addRow("Marker text", self.marker_edit)
+        form.addRow("Look at", self.marker_line)
+        form.addRow("The line", self.marker_mode)
+        form.addRow("", self.marker_remove)
+        test_row = QHBoxLayout()
+        test_row.addStretch(1)
+        test_row.addWidget(test)
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(_hint(
+            "A job is a receipt when the chosen printed text line matches the marker. Blank lines and images "
+            "are not counted, so text line 1 is the first line with text. Receipts get the logo and go to the "
+            "receipts folder; everything else goes to the misc folder without logo."
+        ))
+        layout.addLayout(form)
+        layout.addLayout(test_row)
+        layout.addStretch(1)
+        return page
+
+    def _receipt_rule(self) -> ReceiptRule:
+        return ReceiptRule(
+            self.marker_edit.text(),
+            self.marker_line.value(),
+            bool(self.marker_mode.currentData()),
+            self.marker_remove.isChecked(),
+        )
+
+    def test_receipt_rule(self) -> None:
+        item = self.jobs_list.currentItem()
+        if item is None:
+            QMessageBox.information(self, "Test receipt rule", "Select a job in the jobs list first.")
+            return
+        job = self._job_at(item)
+        if not job.bin.exists():
+            QMessageBox.warning(self, "Test receipt rule", f"No received data saved for {job.stem}.")
+            return
+        rule = self._receipt_rule()
+        lines = elements_to_lines(EscPosParser(PAPER_SIZES[self.paper_combo.currentData()][1]).parse(job.bin.read_bytes()))
+        text_lines = [t for t in (line.strip() for line in lines) if t and not t.startswith("[IMAGE")]
+        shown = "\n".join(f"{'>' if i == rule.line else ' '} {i:2}: {t}" for i, t in enumerate(text_lines[:8], 1))
+        verdict = "RECEIPT (logo, receipts folder)" if rule.matches(lines) else "NOT a receipt (no logo, misc folder)"
+        QMessageBox.information(
+            self, "Test receipt rule", f"{job.stem}\nRule: {rule}\n\nResult: {verdict}\n\nFirst text lines:\n{shown}"
+        )
 
     def _build_forward_tab(self) -> QWidget:
         self.forward_mode = QComboBox()
@@ -718,6 +781,7 @@ class MainWindow(QMainWindow):
             f"Status: {self.status_label.text()}",
             f"Paper: {self.paper_combo.currentData()} mm, idle timeout: {self.idle_spin.value()} s, "
             f"auto cut: {self.auto_cut_check.isChecked()}, clean up jobs: {self.clean_check.isChecked()}",
+            f"Receipt rule: {self._receipt_rule()} (remove marker: {self.marker_remove.isChecked()})",
             f"Forwarding: {self.active_forward_target()}",
             f"Logo: {self._logo_settings()}",
             f"Settings: {self.settings.fileName()}",
@@ -874,6 +938,10 @@ class MainWindow(QMainWindow):
         self.logo_width.setValue(int(s.value("logo_width", 60)))
         self.logo_dither.setChecked(s.value("logo_dither", False, type=bool))
         self.monitor_check.setChecked(s.value("monitor_printer", True, type=bool))
+        self.marker_edit.setText(str(s.value("marker_pattern", DEFAULT_MARKER)))
+        self.marker_line.setValue(int(s.value("marker_line", 1)))
+        self.marker_mode.setCurrentIndex(1 if s.value("marker_contains", False, type=bool) else 0)
+        self.marker_remove.setChecked(s.value("marker_remove", True, type=bool))
         self._update_logo_preview()
 
     def _save_settings(self) -> None:
@@ -894,6 +962,10 @@ class MainWindow(QMainWindow):
         s.setValue("logo_width", self.logo_width.value())
         s.setValue("logo_dither", self.logo_dither.isChecked())
         s.setValue("monitor_printer", self.monitor_check.isChecked())
+        s.setValue("marker_pattern", self.marker_edit.text())
+        s.setValue("marker_line", self.marker_line.value())
+        s.setValue("marker_contains", bool(self.marker_mode.currentData()))
+        s.setValue("marker_remove", self.marker_remove.isChecked())
 
     def _browse_output(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Receipts folder", self.output_edit.text())
@@ -925,6 +997,7 @@ class MainWindow(QMainWindow):
             self._logo_settings(),
             self.auto_cut_check.isChecked(),
             self.clean_check.isChecked(),
+            self._receipt_rule(),
             parent=self,
         )
         try:

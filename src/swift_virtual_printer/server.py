@@ -11,7 +11,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QHostAddress, QNetworkInterface, QTcpServer, QTcpSocket
 
 from . import APP_NAME, __version__
-from .classify import RECEIPT_MARKER, is_receipt, strip_marker
+from .classify import ReceiptRule
 from .escpos import Cut, EscPosParser, elements_to_lines
 from .forward import NETWORK, ForwardTarget, forward_async
 from .logo import ESC_INIT, LogoSettings, bitmap_to_escpos, inject, load_logo
@@ -47,6 +47,7 @@ class PrintServer(QObject):
         logo: LogoSettings | None = None,
         auto_cut: bool = False,
         clean_jobs: bool = True,
+        receipt_rule: ReceiptRule | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -60,6 +61,7 @@ class PrintServer(QObject):
         self.logo = logo or LogoSettings()
         self.auto_cut = auto_cut
         self.clean_jobs = clean_jobs
+        self.receipt_rule = receipt_rule or ReceiptRule()
         self._logo_bytes = b""
         self.renderer = PdfRenderer(paper_mm, paper_dots)
         self._counter = 0
@@ -80,7 +82,7 @@ class PrintServer(QObject):
         if not self._server.listen(QHostAddress(self.host), self.port):
             raise RuntimeError(f"Cannot listen on {self.host}:{self.port}: {self._server.errorString()}")
         log.info("Listening on %s:%d, saving receipts to %s", self.host, self.port, self.output_dir.resolve())
-        log.info("Jobs not starting with %s are saved to %s without logo", RECEIPT_MARKER, self.misc_dir.resolve())
+        log.info("Receipt rule: %s; other jobs are saved to %s without logo", self.receipt_rule, self.misc_dir.resolve())
         if self.forward_target.enabled:
             log.info("Forwarding jobs to %s", self.forward_target)
         if self.auto_cut:
@@ -165,11 +167,11 @@ class PrintServer(QObject):
 
         received_parser = EscPosParser(self.paper_dots)
         received_elements = received_parser.parse(data)
-        receipt = is_receipt(elements_to_lines(received_elements))
+        receipt = self.receipt_rule.matches(elements_to_lines(received_elements))
         if receipt:
             # Marked receipts: drop the marker line (the logo is added below).
             root, category = self.output_dir, "receipt"
-            printed = strip_marker(data)
+            printed = self.receipt_rule.strip(data)
         else:
             root, category = self.misc_dir, "misc"
             printed = data
