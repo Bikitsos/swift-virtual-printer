@@ -13,8 +13,8 @@ from PySide6.QtNetwork import QHostAddress, QNetworkInterface, QTcpServer, QTcpS
 
 from . import APP_NAME, __version__
 from .classify import ReceiptRule
-from .escpos import FONT_CELLS, Cut, EscPosParser, elements_to_lines
-from .fiscal import FiscalSettings, SignResult, build_doc, sign_document, signature_escpos
+from .escpos import Cut, EscPosParser, elements_to_lines
+from .fiscal import FiscalSettings, SignResult, build_doc, insert_signature, sign_document
 from .forward import NETWORK, ForwardTarget, forward_async
 from .logo import ESC_INIT, LogoSettings, bitmap_to_escpos, inject, load_logo
 from .render import PdfRenderer
@@ -249,16 +249,6 @@ class PrintServer(QObject):
         else:
             self._finish(job, "", None)
 
-    def _add_signature(self, printed: bytes, result: SignResult) -> bytes:
-        """Insert the signature block after the last printed text line, before the feed and cut."""
-        parser = EscPosParser(self.paper_dots)
-        parser.parse(printed)
-        position = parser.text_end_before_cut if parser.text_end_before_cut is not None else parser.text_end
-        if position is None:
-            position = len(printed)
-        width = self.paper_dots // FONT_CELLS[0][0]
-        return printed[:position] + signature_escpos(result, width) + printed[position:]
-
     def _finish(self, job: dict, doc: str, result: SignResult | None) -> None:
         stem, peer, data, root, category = job["stem"], job["peer"], job["data"], job["root"], job["category"]
         printed = job["printed"]
@@ -268,7 +258,7 @@ class PrintServer(QObject):
             else:
                 log.warning("Fiscal signing of %s failed: %s", stem, result.error)
                 self.fiscal_failed.emit(stem, result.error)
-            printed = self._add_signature(printed, result)
+            printed = insert_signature(printed, result, self.paper_dots)
 
         pdf_path = root / "pdf" / f"{stem}.pdf"
         json_path = root / "json" / f"{stem}.json"

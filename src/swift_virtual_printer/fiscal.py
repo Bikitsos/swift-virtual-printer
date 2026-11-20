@@ -10,6 +10,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .escpos import FONT_CELLS, EscPosParser
+
 OFF, REST, FILES = "off", "rest", "files"
 DEFAULT_COMMAND_DIR = r"C:\FISCAL_REQUESTANSWER\COMMAND"
 DEFAULT_ANSWER_DIR = r"C:\FISCAL_REQUESTANSWER\ANSWER"
@@ -226,6 +228,33 @@ def signature_escpos(result: SignResult, width: int) -> bytes:
     """ESC/POS bytes for the signature block: normal font, centred, then left alignment again."""
     text = "".join(f"{line[:width]}\n" for line in signature_lines(result, width))
     return b"\x1b!\x00\x1d!\x00\x1dB\x00\x1ba\x01" + text.encode("ascii", errors="replace") + b"\x1ba\x00"
+
+
+# Big bold centred "COPY" printed at the top of reprints of signed receipts (GS ! 0x22 = triple size).
+COPY_HEADER = b"\x1ba\x01\x1bE\x01\x1d!\x22COPY\n\x1d!\x00\x1bE\x00\x1ba\x00"
+
+
+def chars_per_line(paper_dots: int) -> int:
+    return paper_dots // FONT_CELLS[0][0]
+
+
+def insert_signature(printed: bytes, result: SignResult, paper_dots: int) -> bytes:
+    """Insert the signature block after the last printed text line, before the feed and cut."""
+    parser = EscPosParser(paper_dots)
+    parser.parse(printed)
+    position = parser.text_end_before_cut if parser.text_end_before_cut is not None else parser.text_end
+    if position is None:
+        position = len(printed)
+    return printed[:position] + signature_escpos(result, chars_per_line(paper_dots)) + printed[position:]
+
+
+def replace_signature(final: bytes, result: SignResult, paper_dots: int) -> bytes:
+    """Swap the 'no fiscal signature' notice of an unsigned receipt for a new signature block."""
+    width = chars_per_line(paper_dots)
+    failed = signature_escpos(SignResult(False), width)
+    if failed in final:
+        return final.replace(failed, signature_escpos(result, width), 1)
+    return insert_signature(final, result, paper_dots)
 
 
 # -- File-based driver -------------------------------------------------------------

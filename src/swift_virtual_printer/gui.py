@@ -17,6 +17,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal, qVersion
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -42,6 +43,8 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QSystemTrayIcon,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -58,7 +61,8 @@ from .main import PAPER_SIZES
 from .server import PrintServer, misc_dir_for, zreports_dir_for
 from .printer_status import PrinterStatus, check_status
 from . import fiscal
-from .fiscal import FiscalSettings, FiscalStatus
+from .fiscal import COPY_HEADER, FiscalSettings, FiscalStatus, replace_signature
+from .logo import inject
 from .updater import Release, UpdateChecker, UpdateDownloader, can_self_update, is_newer, run_installer
 
 DEFAULT_OUTPUT = default_receipts_dir()
@@ -341,6 +345,8 @@ class ServiceDialog(QDialog):
 class MainWindow(QMainWindow):
     _printer_status_signal = Signal(object, bool)
     _fiscal_status_signal = Signal(object, bool)
+    _resign_signal = Signal(object, str, object)
+    _resign_done_signal = Signal()
 
     def __init__(self, log_emitter: LogEmitter) -> None:
         super().__init__()
@@ -370,6 +376,10 @@ class MainWindow(QMainWindow):
         self._fiscal_timer = QTimer(self)
         self._fiscal_timer.setInterval(FISCAL_CHECK_SECONDS * 1000)
         self._fiscal_timer.timeout.connect(self.check_fiscal)
+        self._resigning = False
+        self._resign_results: dict = {}
+        self._resign_signal.connect(self._on_resigned)
+        self._resign_done_signal.connect(self._on_resign_done)
 
         self._build_ui()
         self._build_menu()
@@ -428,10 +438,14 @@ class MainWindow(QMainWindow):
         jobs_buttons.addWidget(open_folder)
         jobs_buttons.addWidget(open_misc)
         jobs_buttons.addWidget(open_zreports)
-        jobs_box = QGroupBox("Jobs")
+        jobs_box = QWidget()
         jobs_layout = QVBoxLayout(jobs_box)
         jobs_layout.addWidget(self.jobs_list)
         jobs_layout.addLayout(jobs_buttons)
+        self.job_tabs = QTabWidget()
+        self.job_tabs.addTab(jobs_box, "Jobs")
+        self.job_tabs.addTab(self._build_fiscal_receipts_tab(), "Fiscal receipts")
+        self.job_tabs.currentChanged.connect(lambda index: index == 1 and self.refresh_fiscal_receipts())
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -440,7 +454,7 @@ class MainWindow(QMainWindow):
         QVBoxLayout(log_box).addWidget(self.log_view)
 
         right = QSplitter(Qt.Orientation.Vertical)
-        right.addWidget(jobs_box)
+        right.addWidget(self.job_tabs)
         right.addWidget(log_box)
         right.setSizes([360, 220])
 
@@ -456,10 +470,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(main)
         self.setCentralWidget(central)
 
+        self.statusBar().showMessage = self._flash  # type: ignore[method-assign]
         self.status_dot = QLabel("\u25cf")
         self.status_label = QLabel()
+        self.flash_label = QLabel()
+        self.flash_label.setStyleSheet("color: #1565c0;")
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.timeout.connect(self.flash_label.clear)
         self.statusBar().addWidget(self.status_dot)
-        self.statusBar().addWidget(self.status_label, 1)
+        self.statusBar().addWidget(self.status_label)
+        self.statusBar().addWidget(self.flash_label, 1)
         self.printer_dot = QLabel("\u25cf")
         self.printer_label = QLabel()
         self.statusBar().addPermanentWidget(self.printer_dot)
@@ -1285,6 +1306,8 @@ class MainWindow(QMainWindow):
         self.last_job = job
         self._tray_click = self.preview_last_job
         self._add_job_item(job, top=True)
+        if job.root == self.output_dir and self.job_tabs.currentIndex() == 1:
+            self.refresh_fiscal_receipts()
         kind = {self.misc_dir: "Document (misc)", self.zreports_dir: "Z report"}.get(job.root, "Receipt")
         self.tray.showMessage(f"{kind} received", f"{path.stem}\nClick to preview.", QSystemTrayIcon.MessageIcon.Information, 4000)
 
@@ -1299,6 +1322,9 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Preview", lambda: self.preview_job(job))
         menu.addAction("Reprint", lambda: self.reprint_job(job)).setEnabled(job.print_bytes_path is not None)
+        fiscal_record = _fiscal_record(job) if job.root == self.output_dir else None
+        if fiscal_record and not fiscal_record.get("signed"):
+            menu.addAction("Re-sign with fiscal device", lambda: self.resign_jobs([job]))
         menu.addSeparator()
         menu.addAction("Open final PDF", lambda: self._open_path(job.final_pdf)).setEnabled(job.final_pdf.exists())
         menu.addAction("Open PDF as received", lambda: self._open_path(job.pdf)).setEnabled(job.pdf.exists())
@@ -1319,7 +1345,8 @@ class MainWindow(QMainWindow):
     def active_forward_target(self) -> ForwardTarget:
         return self.server.forward_target if self.server else self._forward_target()
 
-    def reprint_job(self, job: Job) -> None:
+    def reprint_job(self, job: Job, copy: bool | None = None, ask: bool = True) -> None:
+        """Send a job to the real printer again; signed receipts get a big COPY header unless copy=False."""
         target = self.active_forward_target()
         if not target.enabled:
             QMessageBox.information(
@@ -1331,12 +1358,228 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Reprint", f"No print data saved for {job.stem}.")
             return
         status = self._printer_status
-        if status is not None and status.online is False:
+        if ask and status is not None and status.online is False:
             answer = QMessageBox.question(self, "Reprint", f"The printer looks offline ({status}).\n\nSend the reprint anyway?")
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        forward_async(target, path.read_bytes(), f"{job.stem} (reprint)")
-        self.statusBar().showMessage(f"Reprint of {job.stem} sent to {target}", 6000)
+        data = path.read_bytes()
+        record = _fiscal_record(job) if job.root == self.output_dir else None
+        if copy is None:
+            copy = bool(record and record.get("signed"))
+        if copy:
+            data = inject(data, COPY_HEADER)
+            self._update_fiscal_record(job, lambda r: r.update(copies_printed=r.get("copies_printed", 0) + 1))
+        forward_async(target, data, f"{job.stem} ({'copy' if copy else 'reprint'})")
+        self.statusBar().showMessage(f"{'Copy' if copy else 'Reprint'} of {job.stem} sent to {target}", 6000)
+
+    def _flash(self, message: str, timeout: int = 0) -> None:
+        """Temporary status-bar message, shown next to (not over) the service status."""
+        self.flash_label.setText(f"   |   {message}" if message else "")
+        if timeout:
+            self._flash_timer.start(timeout)
+        else:
+            self._flash_timer.stop()
+
+    # -- fiscal receipts (signed / unsigned) ---------------------------------
+
+    def _build_fiscal_receipts_tab(self) -> QWidget:
+        self.fiscal_filter = QComboBox()
+        self.fiscal_filter.addItem("All signed and unsigned receipts", "all")
+        self.fiscal_filter.addItem("Unsigned only", "unsigned")
+        self.fiscal_filter.addItem("Signed only", "signed")
+        self.fiscal_filter.currentIndexChanged.connect(self.refresh_fiscal_receipts)
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.refresh_fiscal_receipts)
+        self.fiscal_count = QLabel()
+        top = QHBoxLayout()
+        top.addWidget(self.fiscal_filter)
+        top.addWidget(self.fiscal_count, 1)
+        top.addWidget(refresh)
+
+        self.fiscal_table = QTableWidget(0, 4)
+        self.fiscal_table.setHorizontalHeaderLabels(["Received", "Receipt", "Status", "Signature / error"])
+        self.fiscal_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.fiscal_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.fiscal_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.fiscal_table.verticalHeader().setVisible(False)
+        self.fiscal_table.horizontalHeader().setStretchLastSection(True)
+        self.fiscal_table.doubleClicked.connect(lambda index: self.preview_job(self._fiscal_job_at(index.row())))
+
+        resign = QPushButton("Re-sign selected")
+        resign.setToolTip("Sign unsigned receipts now (the fiscal device must be online).")
+        resign.clicked.connect(lambda: self.resign_jobs(self._selected_fiscal_jobs()))
+        self.resign_print = QCheckBox("Print after re-signing")
+        self.resign_print.setChecked(True)
+        reprint = QPushButton("Reprint selected")
+        reprint.setToolTip("Signed receipts are printed with a large COPY at the top.")
+        reprint.clicked.connect(self._reprint_selected_fiscal)
+        preview = QPushButton("Preview")
+        preview.clicked.connect(
+            lambda: (jobs := self._selected_fiscal_jobs()) and self.preview_job(jobs[0])
+        )
+        buttons = QHBoxLayout()
+        buttons.addWidget(resign)
+        buttons.addWidget(self.resign_print)
+        buttons.addStretch(1)
+        buttons.addWidget(preview)
+        buttons.addWidget(reprint)
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addLayout(top)
+        layout.addWidget(self.fiscal_table, 1)
+        layout.addLayout(buttons)
+        layout.addWidget(_hint("Reprints of signed receipts get a large COPY at the top. Re-signed receipts are printed "
+                               "without COPY the first time, since the original printed without a signature."))
+        return page
+
+    def refresh_fiscal_receipts(self) -> None:
+        wanted = self.fiscal_filter.currentData()
+        rows = []
+        json_dir = self.output_dir / "json"
+        for path in sorted(json_dir.glob("*.json"), reverse=True)[:2000] if json_dir.is_dir() else []:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            fiscal_record = record.get("fiscal")
+            if not fiscal_record:
+                continue
+            signed = bool(fiscal_record.get("signed"))
+            if wanted == "all" or (wanted == "signed") == signed:
+                rows.append((Job(self.output_dir, path.stem), record, fiscal_record, signed))
+
+        self.fiscal_table.setRowCount(0)
+        unsigned_total = sum(1 for *_, signed in rows if not signed)
+        for job, record, fiscal_record, signed in rows:
+            row = self.fiscal_table.rowCount()
+            self.fiscal_table.insertRow(row)
+            if signed:
+                status = "Re-signed" if fiscal_record.get("resigned") else "Signed"
+                detail = fiscal_record.get("signature", "")
+                copies = fiscal_record.get("copies_printed", 0)
+                if copies:
+                    detail += f"   ({copies} cop{'y' if copies == 1 else 'ies'} printed)"
+            else:
+                status, detail = "UNSIGNED", fiscal_record.get("error", "")
+            values = [record.get("received", "").replace("T", " "), job.stem, status, detail]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setForeground(QColor("#2e7d32" if signed else "#c62828"))
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, job)
+                self.fiscal_table.setItem(row, column, item)
+        self.fiscal_table.resizeColumnsToContents()
+        self.fiscal_count.setText(f"{len(rows)} shown, {unsigned_total} unsigned")
+
+    def _fiscal_job_at(self, row: int) -> Job:
+        return self.fiscal_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+
+    def _selected_fiscal_jobs(self) -> list[Job]:
+        rows = sorted({index.row() for index in self.fiscal_table.selectionModel().selectedRows()})
+        return [self._fiscal_job_at(row) for row in rows]
+
+    def _reprint_selected_fiscal(self) -> None:
+        jobs = self._selected_fiscal_jobs()
+        if not jobs:
+            QMessageBox.information(self, "Reprint", "Select one or more receipts first.")
+            return
+        for index, job in enumerate(jobs):
+            self.reprint_job(job, ask=index == 0)
+        self.refresh_fiscal_receipts()
+
+    def _update_fiscal_record(self, job: Job, change) -> None:
+        try:
+            record = json.loads(job.json.read_text(encoding="utf-8"))
+            if record.get("fiscal"):
+                change(record["fiscal"])
+                job.json.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            logging.error("Cannot update %s: %s", job.json, exc)
+
+    def resign_jobs(self, jobs: list[Job]) -> None:
+        pending = []
+        for job in jobs:
+            record = _fiscal_record(job)
+            if record and not record.get("signed") and record.get("doc"):
+                pending.append((job, record["doc"]))
+        if not pending:
+            QMessageBox.information(self, "Re-sign", "Select one or more UNSIGNED receipts first.")
+            return
+        settings = self._fiscal_settings()
+        if settings.mode != fiscal.REST:
+            QMessageBox.information(self, "Re-sign", "Re-signing uses the RESTful API. Choose it on the Fiscal tab first.")
+            return
+        print_after = self.resign_print.isChecked()
+        if print_after and not self.active_forward_target().enabled:
+            QMessageBox.information(self, "Re-sign", "No real printer is set up, so the receipts will only be signed, not printed.")
+            print_after = False
+        if self._resigning:
+            return
+        answer = QMessageBox.question(
+            self, "Re-sign",
+            f"Sign {len(pending)} receipt(s) with the fiscal device now" + (" and print them" if print_after else "") + "?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._resigning = True
+        self._resign_results = {"ok": 0, "failed": 0, "error": "", "print": print_after}
+        self.statusBar().showMessage(f"Re-signing {len(pending)} receipt(s)...")
+
+        def run() -> None:
+            for job, doc in pending:
+                try:
+                    result = fiscal.sign_document(settings.host, settings.port, doc)
+                except Exception as exc:  # keep going with the other receipts
+                    result = fiscal.SignResult(False, error=str(exc))
+                self._resign_signal.emit(job, doc, result)
+            self._resign_done_signal.emit()
+
+        threading.Thread(target=run, name="resign", daemon=True).start()
+
+    def _on_resigned(self, job: Job, doc: str, result: fiscal.SignResult) -> None:
+        if not result.ok:
+            self._resign_results["failed"] += 1
+            self._resign_results["error"] = result.error
+            logging.warning("Re-signing %s failed: %s", job.stem, result.error)
+            return
+        try:
+            self._apply_signature(job, doc, result)
+        except (OSError, ValueError) as exc:
+            logging.error("Signed %s but could not update its files: %s", job.stem, exc)
+        self._resign_results["ok"] += 1
+        logging.info("Re-signed %s: %s (Z %s)", job.stem, result.signature, result.z_no)
+        if self._resign_results["print"]:
+            self.reprint_job(job, copy=False, ask=False)
+
+    def _apply_signature(self, job: Job, doc: str, result: fiscal.SignResult) -> None:
+        """Put the new signature into the job's final bytes, final PDF and JSON."""
+        paper_mm, paper_dots = PAPER_SIZES[self.paper_combo.currentData()]
+        final = replace_signature(job.final_bin.read_bytes(), result, paper_dots)
+        job.final_bin.write_bytes(final)
+        elements = EscPosParser(paper_dots).parse(final)
+        PdfRenderer(paper_mm, paper_dots).render(elements, job.final_pdf)
+        record = json.loads(job.json.read_text(encoding="utf-8"))
+        previous = record.get("fiscal") or {}
+        fiscal_record = result.as_record(doc)
+        fiscal_record["resigned"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        fiscal_record["first_error"] = previous.get("error")
+        record["fiscal"] = fiscal_record
+        lines = elements_to_lines(elements)
+        record["line_count"] = len(lines)
+        record["lines"] = {f"line_{i:03d}": text for i, text in enumerate(lines, 1)}
+        job.json.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _on_resign_done(self) -> None:
+        self._resigning = False
+        results = self._resign_results
+        self.refresh_fiscal_receipts()
+        self.refresh_jobs()
+        message = f"Signed {results['ok']} receipt(s)."
+        if results["failed"]:
+            message += f"\n{results['failed']} could not be signed: {results['error']}"
+        self.statusBar().showMessage(message.replace("\n", " "), 8000)
+        (QMessageBox.warning if results["failed"] else QMessageBox.information)(self, "Re-sign", message)
 
     # -- real printer status -------------------------------------------------
 
@@ -1450,7 +1693,9 @@ class MainWindow(QMainWindow):
             self.fiscal_details.setText("")
             return
         color = colors.get(status.state, "#9e9e9e")
-        self.fiscal_label.setText(f"Fiscal: {status.summary}")
+        short = status.summary if len(status.summary) <= 40 else status.summary[:38].rstrip() + "..."
+        self.fiscal_label.setText(f"Fiscal: {short}")
+        self.fiscal_label.setToolTip(status.summary)
         self.fiscal_dot.setStyleSheet(f"font-size: 14pt; color: {color};")
         self.fiscal_state_label.setText(status.summary)
         self.fiscal_state_label.setStyleSheet(f"font-size: 12pt; font-weight: bold; color: {color};")

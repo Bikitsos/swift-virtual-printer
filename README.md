@@ -110,6 +110,18 @@ DUE TO FISCAL DEVICE FAILURE
 
 A tray warning appears, the error is logged, and the job shows in **red as `(UNSIGNED)`** in the jobs list. The job's JSON gets a `"fiscal"` section with the `doc` that was sent and either the signature data (`signature`, `device_serial`, `z_no`, `daily_signatures`, `total_signatures`, `date`, `time`) or the `error`. On the command line: `--fiscal-sign [--fiscal-host 127.0.0.1] [--fiscal-port 9999]`.
 
+#### Fiscal receipts tab (re-sign and copies)
+
+The **Fiscal receipts** tab, next to **Jobs**, lists every receipt that was sent for signing. You can filter it to *all*, *unsigned only* or *signed only*. Signed receipts are green (*Signed* or *Re-signed*, with the signature and the number of copies printed). Unsigned receipts are red (*UNSIGNED*, with the error).
+
+- **Re-sign selected:** when the fiscal device is back online, select one or more unsigned receipts (or right-click an unsigned job in the Jobs list → *Re-sign with fiscal device*).
+  - The exact same `doc` text is sent to `sign_doc` again.
+  - On success, the *no fiscal signature* notice in the final receipt is replaced by the signature block.
+  - The final `.bin`, final PDF and JSON are updated. The JSON gets `resigned` (time) and `first_error`.
+  - With **Print after re-signing** ticked (the default), the signed receipt is printed straight away, without COPY, because it's the first signed print of that receipt.
+- **Reprint selected / Reprint:** a reprint of a **signed** receipt from the app gets a large, bold, centred **COPY** at the very top, and the JSON counts `copies_printed`. Reprints of unsigned receipts are printed unchanged.
+- **Preview** or double-click shows the final receipt.
+
 ### Service menu
 
 **Service → Service tools...** (also **Service...** in the tray menu) opens the administrative tools after you enter the service password. Ask your administrator for it. After 3 wrong attempts the menu is locked for 60 seconds.
