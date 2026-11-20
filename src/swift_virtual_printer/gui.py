@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import logging
 import platform
 import signal
@@ -55,11 +56,14 @@ from .render import PdfRenderer, bitmap_to_qimage
 from .main import PAPER_SIZES
 from .server import PrintServer, misc_dir_for, zreports_dir_for
 from .printer_status import PrinterStatus, check_status
+from . import fiscal
+from .fiscal import FiscalSettings, FiscalStatus
 from .updater import Release, UpdateChecker, UpdateDownloader, can_self_update, is_newer, run_installer
 
 DEFAULT_OUTPUT = default_receipts_dir()
 LOGO_PREVIEW_WIDTH = 400
 PRINTER_CHECK_SECONDS = 30
+FISCAL_CHECK_SECONDS = 60
 
 
 def _hint(text: str) -> QLabel:
@@ -327,6 +331,7 @@ class ServiceDialog(QDialog):
 
 class MainWindow(QMainWindow):
     _printer_status_signal = Signal(object, bool)
+    _fiscal_status_signal = Signal(object, bool)
 
     def __init__(self, log_emitter: LogEmitter) -> None:
         super().__init__()
@@ -350,6 +355,12 @@ class MainWindow(QMainWindow):
         self._printer_timer = QTimer(self)
         self._printer_timer.setInterval(PRINTER_CHECK_SECONDS * 1000)
         self._printer_timer.timeout.connect(self.check_printer)
+        self._fiscal_status: FiscalStatus | None = None
+        self._fiscal_checking = False
+        self._fiscal_status_signal.connect(self._on_fiscal_status)
+        self._fiscal_timer = QTimer(self)
+        self._fiscal_timer.setInterval(FISCAL_CHECK_SECONDS * 1000)
+        self._fiscal_timer.timeout.connect(self.check_fiscal)
 
         self._build_ui()
         self._build_menu()
@@ -361,6 +372,7 @@ class MainWindow(QMainWindow):
         self.refresh_jobs()
         if self.auto_update_action.isChecked():
             QTimer.singleShot(5000, lambda: self.check_for_updates(silent=True))
+        QTimer.singleShot(2000, self.check_fiscal)
 
     # -- UI construction ----------------------------------------------------
 
@@ -370,6 +382,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_receipt_tab(), "Receipts")
         tabs.addTab(self._build_forward_tab(), "Forwarding")
         tabs.addTab(self._build_logo_tab(), "Logo")
+        tabs.addTab(self._build_fiscal_tab(), "Fiscal")
         self.paper_combo.currentIndexChanged.connect(self._update_logo_preview)
 
         self.toggle_button = QPushButton()
@@ -442,6 +455,10 @@ class MainWindow(QMainWindow):
         self.printer_label = QLabel()
         self.statusBar().addPermanentWidget(self.printer_dot)
         self.statusBar().addPermanentWidget(self.printer_label)
+        self.fiscal_dot = QLabel("\u25cf")
+        self.fiscal_label = QLabel()
+        self.statusBar().addPermanentWidget(self.fiscal_dot)
+        self.statusBar().addPermanentWidget(self.fiscal_label)
 
     def _build_printer_tab(self) -> QWidget:
         self.host_edit = QLineEdit()
@@ -654,6 +671,83 @@ class MainWindow(QMainWindow):
             printer=self.forward_printer.currentText().strip(),
         )
 
+    def _build_fiscal_tab(self) -> QWidget:
+        self.fiscal_mode = QComboBox()
+        self.fiscal_mode.addItem("Off", fiscal.OFF)
+        self.fiscal_mode.addItem("RESTful API (web service)", fiscal.REST)
+        self.fiscal_mode.addItem("File-based driver (FES32 command/answer files)", fiscal.FILES)
+        self.fiscal_host = QLineEdit()
+        self.fiscal_port = QSpinBox()
+        self.fiscal_port.setRange(1, 65535)
+        self.fiscal_command_dir = QLineEdit()
+        self.fiscal_answer_dir = QLineEdit()
+
+        def folder_row(edit: QLineEdit, title: str) -> QHBoxLayout:
+            browse = QPushButton("Browse...")
+            browse.clicked.connect(
+                lambda: edit.setText(QFileDialog.getExistingDirectory(self, title, edit.text()) or edit.text())
+            )
+            row = QHBoxLayout()
+            row.addWidget(edit)
+            row.addWidget(browse)
+            return row
+
+        self.fiscal_form = QFormLayout()
+        self.fiscal_form.addRow("Connection", self.fiscal_mode)
+        self.fiscal_form.addRow("Driver address", self.fiscal_host)
+        self.fiscal_form.addRow("Driver port", self.fiscal_port)
+        self.fiscal_form.addRow("Command folder", folder_row(self.fiscal_command_dir, "Command folder"))
+        self.fiscal_form.addRow("Answer folder", folder_row(self.fiscal_answer_dir, "Answer folder"))
+        self.fiscal_mode.currentIndexChanged.connect(self._update_fiscal_fields)
+
+        self.fiscal_monitor = QCheckBox(f"Check every {FISCAL_CHECK_SECONDS} s and notify on problems")
+        self.fiscal_monitor.toggled.connect(self._update_fiscal_timer)
+        check_now = QPushButton("Check now")
+        check_now.clicked.connect(lambda: self.check_fiscal(manual=True))
+        check_row = QHBoxLayout()
+        check_row.addWidget(self.fiscal_monitor, 1)
+        check_row.addWidget(check_now)
+
+        self.fiscal_state_label = QLabel("Not checked yet")
+        self.fiscal_state_label.setWordWrap(True)
+        self.fiscal_state_label.setStyleSheet("font-size: 12pt; font-weight: bold;")
+        self.fiscal_details = QLabel()
+        self.fiscal_details.setWordWrap(True)
+        self.fiscal_details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        status_box = QGroupBox("Fiscal device status")
+        status_layout = QVBoxLayout(status_box)
+        status_layout.addWidget(self.fiscal_state_label)
+        status_layout.addWidget(self.fiscal_details)
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(_hint(
+            "Status of the Cy-Net 100 fiscal device, read through its driver: the RESTful API "
+            "(POST /check_system, default 127.0.0.1:9999) or the file-based driver (status command 'S')."
+        ))
+        layout.addLayout(self.fiscal_form)
+        layout.addLayout(check_row)
+        layout.addWidget(status_box)
+        layout.addStretch(1)
+        return page
+
+    def _update_fiscal_fields(self) -> None:
+        mode = self.fiscal_mode.currentData()
+        # Rows: 0 connection, 1 address, 2 port, 3 command folder, 4 answer folder.
+        for row, visible in ((1, mode == fiscal.REST), (2, mode == fiscal.REST), (3, mode == fiscal.FILES), (4, mode == fiscal.FILES)):
+            self.fiscal_form.setRowVisible(row, visible)
+        self._fiscal_status = None
+        self._update_fiscal_timer()
+
+    def _fiscal_settings(self) -> FiscalSettings:
+        return FiscalSettings(
+            self.fiscal_mode.currentData(),
+            self.fiscal_host.text().strip() or "127.0.0.1",
+            self.fiscal_port.value(),
+            self.fiscal_command_dir.text().strip(),
+            self.fiscal_answer_dir.text().strip(),
+        )
+
     def _build_logo_tab(self) -> QWidget:
         self.logo_check = QCheckBox("Print logo at the top of every receipt")
         self.logo_path = QLineEdit()
@@ -831,6 +925,8 @@ class MainWindow(QMainWindow):
             f"Z report rule: {self._zreport_rule() or 'off'}",
             f"Forwarding: {self.active_forward_target()}",
             f"Logo: {self._logo_settings()}",
+            f"Fiscal device: {self._fiscal_settings()} - "
+            f"{self._fiscal_status.summary if self._fiscal_status else 'not checked'}",
             f"Settings: {self.settings.fileName()}",
         ]
         for name, root in self.job_roots:
@@ -986,6 +1082,13 @@ class MainWindow(QMainWindow):
         self.logo_width.setValue(int(s.value("logo_width", 60)))
         self.logo_dither.setChecked(s.value("logo_dither", False, type=bool))
         self.monitor_check.setChecked(s.value("monitor_printer", True, type=bool))
+        self.fiscal_mode.setCurrentIndex(max(0, self.fiscal_mode.findData(str(s.value("fiscal_mode", fiscal.OFF)))))
+        self.fiscal_host.setText(str(s.value("fiscal_host", "127.0.0.1")))
+        self.fiscal_port.setValue(int(s.value("fiscal_port", 9999)))
+        self.fiscal_command_dir.setText(str(s.value("fiscal_command_dir", fiscal.DEFAULT_COMMAND_DIR)))
+        self.fiscal_answer_dir.setText(str(s.value("fiscal_answer_dir", fiscal.DEFAULT_ANSWER_DIR)))
+        self.fiscal_monitor.setChecked(s.value("fiscal_monitor", True, type=bool))
+        self._update_fiscal_fields()
         self.marker_edit.setText(str(s.value("marker_pattern", DEFAULT_MARKER)))
         self.marker_line.setValue(int(s.value("marker_line", 1)))
         self.marker_mode.setCurrentIndex(1 if s.value("marker_contains", False, type=bool) else 0)
@@ -1015,6 +1118,12 @@ class MainWindow(QMainWindow):
         s.setValue("logo_width", self.logo_width.value())
         s.setValue("logo_dither", self.logo_dither.isChecked())
         s.setValue("monitor_printer", self.monitor_check.isChecked())
+        s.setValue("fiscal_mode", self.fiscal_mode.currentData())
+        s.setValue("fiscal_host", self.fiscal_host.text().strip())
+        s.setValue("fiscal_port", self.fiscal_port.value())
+        s.setValue("fiscal_command_dir", self.fiscal_command_dir.text().strip())
+        s.setValue("fiscal_answer_dir", self.fiscal_answer_dir.text().strip())
+        s.setValue("fiscal_monitor", self.fiscal_monitor.isChecked())
         s.setValue("marker_pattern", self.marker_edit.text())
         s.setValue("marker_line", self.marker_line.value())
         s.setValue("marker_contains", bool(self.marker_mode.currentData()))
@@ -1250,6 +1359,73 @@ class MainWindow(QMainWindow):
         self.printer_label.setText(text)
         self.printer_dot.setStyleSheet(f"font-size: 14pt; color: {color};")
         self.printer_status_label.setText(detail)
+
+    # -- fiscal device status ------------------------------------------------
+
+    def _update_fiscal_timer(self) -> None:
+        enabled = self._fiscal_settings().enabled
+        if enabled and self.fiscal_monitor.isChecked():
+            self._fiscal_timer.start()
+        else:
+            self._fiscal_timer.stop()
+        if not enabled:
+            self._show_fiscal_status(None)
+
+    def check_fiscal(self, manual: bool = False) -> None:
+        settings = self._fiscal_settings()
+        if not settings.enabled:
+            self._show_fiscal_status(None)
+            if manual:
+                QMessageBox.information(self, "Fiscal device", "Choose how to connect to the fiscal driver first.")
+            return
+        if self._fiscal_checking:
+            return
+        self._fiscal_checking = True
+        if manual:
+            self.fiscal_state_label.setText("Checking...")
+
+        def run() -> None:
+            try:
+                status = fiscal.check_status(settings)
+            except Exception as exc:  # status checks must never take the app down
+                status = FiscalStatus("unknown", f"Check failed: {exc}")
+            self._fiscal_status_signal.emit(status, manual)
+
+        threading.Thread(target=run, name="fiscal-status", daemon=True).start()
+
+    def _on_fiscal_status(self, status: FiscalStatus, manual: bool) -> None:
+        self._fiscal_checking = False
+        previous, self._fiscal_status = self._fiscal_status, status
+        self._show_fiscal_status(status)
+        changed = previous is None or (previous.state, previous.problems) != (status.state, status.problems)
+        if changed or manual:
+            log = logging.info if status.ok else logging.warning
+            log("Fiscal device: %s (%s)", status.summary, status.source or "no source")
+        if changed and previous is not None and not manual:
+            icon = QSystemTrayIcon.MessageIcon.Information if status.ok else QSystemTrayIcon.MessageIcon.Warning
+            title = "Fiscal device ready" if status.ok else "Fiscal device problem"
+            self.tray.showMessage(title, status.summary, icon, 8000)
+
+    def _show_fiscal_status(self, status: FiscalStatus | None) -> None:
+        colors = {"ok": "#2e7d32", "warning": "#ef6c00", "error": "#c62828", "disconnected": "#c62828"}
+        if status is None:
+            self.fiscal_label.setText("Fiscal: off")
+            self.fiscal_dot.setStyleSheet("font-size: 14pt; color: #9e9e9e;")
+            self.fiscal_state_label.setText("Fiscal device status is off.")
+            self.fiscal_state_label.setStyleSheet("font-size: 12pt; font-weight: bold; color: #9e9e9e;")
+            self.fiscal_details.setText("")
+            return
+        color = colors.get(status.state, "#9e9e9e")
+        self.fiscal_label.setText(f"Fiscal: {status.summary}")
+        self.fiscal_dot.setStyleSheet(f"font-size: 14pt; color: {color};")
+        self.fiscal_state_label.setText(status.summary)
+        self.fiscal_state_label.setStyleSheet(f"font-size: 12pt; font-weight: bold; color: {color};")
+        rows = [f"<tr><td><b>Problem</b></td><td>{html.escape(p)}</td></tr>" for p in status.problems]
+        rows += [f"<tr><td>{html.escape(k)}</td><td>{html.escape(v)}</td></tr>" for k, v in status.details.items()]
+        rows.append(
+            f"<tr><td>Checked</td><td>{time.strftime('%H:%M:%S')} via {html.escape(status.source or 'n/a')}</td></tr>"
+        )
+        self.fiscal_details.setText(f"<table cellspacing='4'>{''.join(rows)}</table>")
 
     def open_output_folder(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)

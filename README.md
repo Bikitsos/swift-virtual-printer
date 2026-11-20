@@ -13,6 +13,7 @@ Built with [PySide6](https://doc.qt.io/qtforpython/) and managed with [uv](https
 - Replies to real-time status requests (`DLE EOT`) so drivers that poll the printer don't stall
 - Saves every job as received (raw `.bin` data and PDF), as finalized (exactly what goes to the real printer, logo included), and as a JSON text version with one field per printed line
 - Preview any job in the app and reprint it to the real printer
+- Shows the status of a **Cy-Net 100** fiscal device (via its RESTful API or file-based driver)
 - Optionally forwards each job's original bytes to a real printer (network raw TCP or an installed Windows printer)
 - Optional PNG/JPG logo printed at the top of every receipt, in the PDF and on the real printer
 - Sorts jobs: receipts matching a configurable marker (default `-R-R-R-` on the first text line) get the logo and go to `receipts/`; Z reports (default: any line contains `Z REPORT`) go to `zreports/` without the logo; everything else prints without the logo and goes to `misc/`
@@ -64,6 +65,19 @@ uv run virtual-printer-gui --minimized  # start hidden in the tray
 - **Double-click** a job to open its **preview**. You can switch between *Final (as printed, with logo)* and *As received from the POS*, zoom in or out, **Reprint** it, or open the PDF.
 - **Right-click** a job for: Preview, Reprint, Open final PDF, Open PDF as received, Open JSON, Copy JSON path, Show in folder.
 - **Reprint** sends the job's final bytes (with the logo it was printed with) to the printer set on the **Forwarding** tab. Older jobs without a final copy are reprinted as received.
+
+### Fiscal device (Cy-Net 100)
+
+The **Fiscal** tab shows the status of a Cy-Net 100 fiscal device by asking its driver. The app only *reads* the status; it does not sign documents or issue Z reports.
+
+| Connection | How | Settings |
+| --- | --- | --- |
+| RESTful API | `POST http://<address>:<port>/check_system` | Driver address and port (default `127.0.0.1:9999`); the driver's web service must be enabled |
+| File-based driver (FES32) | Writes `S` to `command918.txt` in the command folder and reads `answer918.txt` from the answer folder (number 918 avoids clashing with the POS's own command files) | Command and answer folders (default `C:\FISCAL_REQUESTANSWER\COMMAND` / `ANSWER`) |
+
+It shows **Ready**, a warning (e.g. *30 or fewer daily zerosets left*), an error (e.g. *Printer paper end detected*, *Z closure time limit*, *Paper end on device*) or *disconnected*, together with the device counters: last Z number, daily and total signatures, and remaining block signatures (REST); or daily signatures, total zerosets, device date/time, fiscal number and model (file driver). Error codes are translated using the tables in the Cy-Net 100 programmer's manual.
+
+The status bar shows a **Fiscal** indicator. With *Check every 60 s* turned on (the default), a tray notification appears when the status changes. **Check now** checks immediately. Click **Apply & Restart** to save the fiscal settings.
 
 ### Service menu
 
