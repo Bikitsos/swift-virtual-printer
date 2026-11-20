@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import logging
 import platform
 import signal
@@ -95,6 +96,14 @@ def make_icon(active: bool) -> QIcon:
 
 class LogEmitter(QObject):
     message = Signal(str)
+
+
+def _fiscal_record(job: Job) -> dict | None:
+    """The 'fiscal' section of a job's JSON, or None if the job wasn't sent for signing."""
+    try:
+        return json.loads(job.json.read_text(encoding="utf-8")).get("fiscal")
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -701,6 +710,11 @@ class MainWindow(QMainWindow):
         self.fiscal_mode.currentIndexChanged.connect(self._update_fiscal_fields)
 
         self.fiscal_monitor = QCheckBox(f"Check every {FISCAL_CHECK_SECONDS} s and notify on problems")
+        self.fiscal_sign = QCheckBox("Sign receipts with the fiscal device before printing (RESTful API)")
+        self.fiscal_sign.setToolTip(
+            "Each receipt is sent to sign_doc first; the signature block is printed at the bottom. "
+            "If signing fails, the receipt prints with 'THERE IS NO FISCAL SIGNATURE DUE TO FISCAL DEVICE FAILURE'."
+        )
         self.fiscal_monitor.toggled.connect(self._update_fiscal_timer)
         check_now = QPushButton("Check now")
         check_now.clicked.connect(lambda: self.check_fiscal(manual=True))
@@ -727,17 +741,23 @@ class MainWindow(QMainWindow):
         ))
         layout.addLayout(self.fiscal_form)
         layout.addLayout(check_row)
+        layout.addWidget(self.fiscal_sign)
         layout.addWidget(status_box)
         layout.addStretch(1)
         return page
 
     def _update_fiscal_fields(self) -> None:
+        self.fiscal_sign.setEnabled(self.fiscal_mode.currentData() == fiscal.REST)
         mode = self.fiscal_mode.currentData()
         # Rows: 0 connection, 1 address, 2 port, 3 command folder, 4 answer folder.
         for row, visible in ((1, mode == fiscal.REST), (2, mode == fiscal.REST), (3, mode == fiscal.FILES), (4, mode == fiscal.FILES)):
             self.fiscal_form.setRowVisible(row, visible)
         self._fiscal_status = None
         self._update_fiscal_timer()
+
+    def _fiscal_sign_settings(self) -> FiscalSettings | None:
+        settings = self._fiscal_settings()
+        return settings if self.fiscal_sign.isChecked() and settings.mode == fiscal.REST else None
 
     def _fiscal_settings(self) -> FiscalSettings:
         return FiscalSettings(
@@ -1088,6 +1108,7 @@ class MainWindow(QMainWindow):
         self.fiscal_command_dir.setText(str(s.value("fiscal_command_dir", fiscal.DEFAULT_COMMAND_DIR)))
         self.fiscal_answer_dir.setText(str(s.value("fiscal_answer_dir", fiscal.DEFAULT_ANSWER_DIR)))
         self.fiscal_monitor.setChecked(s.value("fiscal_monitor", True, type=bool))
+        self.fiscal_sign.setChecked(s.value("fiscal_sign", False, type=bool))
         self._update_fiscal_fields()
         self.marker_edit.setText(str(s.value("marker_pattern", DEFAULT_MARKER)))
         self.marker_line.setValue(int(s.value("marker_line", 1)))
@@ -1124,6 +1145,7 @@ class MainWindow(QMainWindow):
         s.setValue("fiscal_command_dir", self.fiscal_command_dir.text().strip())
         s.setValue("fiscal_answer_dir", self.fiscal_answer_dir.text().strip())
         s.setValue("fiscal_monitor", self.fiscal_monitor.isChecked())
+        s.setValue("fiscal_sign", self.fiscal_sign.isChecked())
         s.setValue("marker_pattern", self.marker_edit.text())
         s.setValue("marker_line", self.marker_line.value())
         s.setValue("marker_contains", bool(self.marker_mode.currentData()))
@@ -1166,6 +1188,7 @@ class MainWindow(QMainWindow):
             self.clean_check.isChecked(),
             self._receipt_rule(),
             self._zreport_rule(),
+            self._fiscal_sign_settings(),
             parent=self,
         )
         try:
@@ -1177,6 +1200,11 @@ class MainWindow(QMainWindow):
             self.tray.showMessage(APP_NAME, str(exc), QSystemTrayIcon.MessageIcon.Warning)
             return
         server.job_saved.connect(self._on_job_saved)
+        server.fiscal_failed.connect(
+            lambda stem, error: self.tray.showMessage(
+                "Receipt NOT fiscally signed", f"{stem}\n{error}", QSystemTrayIcon.MessageIcon.Warning, 10000
+            )
+        )
         self.server = server
         self._set_running(True)
         # Target may have changed: forget the old status and check the (new) real printer.
@@ -1218,10 +1246,16 @@ class MainWindow(QMainWindow):
 
     def _add_job_item(self, job: Job, top: bool = False) -> None:
         tag = {self.misc_dir: "    (misc)", self.zreports_dir: "    (Z report)"}.get(job.root, "")
+        fiscal_record = _fiscal_record(job) if job.root == self.output_dir else None
+        unsigned = bool(fiscal_record) and not fiscal_record.get("signed")
+        if unsigned:
+            tag = "    (UNSIGNED)"
         item = QListWidgetItem(job.stem + tag)
         item.setData(Qt.ItemDataRole.UserRole, job)
-        item.setToolTip(str(job.best_pdf))
-        if job.root == self.misc_dir:
+        item.setToolTip(str(job.best_pdf) + (f"\nNot signed: {fiscal_record.get('error', '')}" if unsigned else ""))
+        if unsigned:
+            item.setForeground(QColor("#c62828"))
+        elif job.root == self.misc_dir:
             item.setForeground(QColor("#777777"))
         elif job.root == self.zreports_dir:
             item.setForeground(QColor("#1565c0"))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -12,7 +13,8 @@ from PySide6.QtNetwork import QHostAddress, QNetworkInterface, QTcpServer, QTcpS
 
 from . import APP_NAME, __version__
 from .classify import ReceiptRule
-from .escpos import Cut, EscPosParser, elements_to_lines
+from .escpos import FONT_CELLS, Cut, EscPosParser, elements_to_lines
+from .fiscal import FiscalSettings, SignResult, build_doc, sign_document, signature_escpos
 from .forward import NETWORK, ForwardTarget, forward_async
 from .logo import ESC_INIT, LogoSettings, bitmap_to_escpos, inject, load_logo
 from .render import PdfRenderer
@@ -39,6 +41,8 @@ def zreports_dir_for(receipts_dir: Path) -> Path:
 
 class PrintServer(QObject):
     job_saved = Signal(Path)
+    fiscal_failed = Signal(str, str)  # job name, error
+    _signed = Signal(object, str, object)
 
     def __init__(
         self,
@@ -54,6 +58,7 @@ class PrintServer(QObject):
         clean_jobs: bool = True,
         receipt_rule: ReceiptRule | None = None,
         zreport_rule: ReceiptRule | None = None,
+        fiscal_sign: FiscalSettings | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -70,6 +75,9 @@ class PrintServer(QObject):
         self.receipt_rule = receipt_rule or ReceiptRule()
         # None (or an empty pattern) disables Z report detection.
         self.zreport_rule = zreport_rule if zreport_rule and zreport_rule.pattern else None
+        # Fiscal device (RESTful API) used to sign receipts before printing; None = no signing.
+        self.fiscal_sign = fiscal_sign
+        self._signed.connect(self._finish)
         self._logo_bytes = b""
         self.renderer = PdfRenderer(paper_mm, paper_dots)
         self._counter = 0
@@ -97,6 +105,8 @@ class PrintServer(QObject):
             log.info("Forwarding jobs to %s", self.forward_target)
         if self.auto_cut:
             log.info("Adding a paper cut to jobs that have none")
+        if self.fiscal_sign:
+            log.info("Signing receipts with the fiscal device at %s", self.fiscal_sign)
 
     @property
     def misc_dir(self) -> Path:
@@ -213,12 +223,57 @@ class PrintServer(QObject):
             printed += AUTO_CUT
 
         bin_path = root / "bin" / f"{stem}.bin"
+        # bin/ and pdf/ keep the job as received; final/ holds exactly what goes to the real printer.
+        bin_path.write_bytes(data)
+        job = {
+            "stem": stem, "peer": peer, "received": received, "data": data, "printed": printed,
+            "received_elements": received_elements, "root": root, "category": category, "receipt": receipt,
+            "reset_added": reset_added, "line_end_added": line_end_added, "cut_added": cut_added,
+        }
+        if receipt and self.fiscal_sign:
+            doc = build_doc(elements_to_lines(EscPosParser(self.paper_dots).parse(printed)))
+            settings = self.fiscal_sign
+            log.info("Signing %s with the fiscal device...", stem)
+
+            def sign() -> None:
+                try:
+                    result = sign_document(settings.host, settings.port, doc)
+                except Exception as exc:  # never lose the receipt because signing crashed
+                    result = SignResult(False, error=f"Signing failed: {exc}")
+                try:
+                    self._signed.emit(job, doc, result)
+                except RuntimeError:  # server was stopped and deleted meanwhile (settings applied)
+                    log.error("Print service restarted while signing %s; the job was not printed", stem)
+
+            threading.Thread(target=sign, name=f"sign-{stem}", daemon=True).start()
+        else:
+            self._finish(job, "", None)
+
+    def _add_signature(self, printed: bytes, result: SignResult) -> bytes:
+        """Insert the signature block after the last printed text line, before the feed and cut."""
+        parser = EscPosParser(self.paper_dots)
+        parser.parse(printed)
+        position = parser.text_end_before_cut if parser.text_end_before_cut is not None else parser.text_end
+        if position is None:
+            position = len(printed)
+        width = self.paper_dots // FONT_CELLS[0][0]
+        return printed[:position] + signature_escpos(result, width) + printed[position:]
+
+    def _finish(self, job: dict, doc: str, result: SignResult | None) -> None:
+        stem, peer, data, root, category = job["stem"], job["peer"], job["data"], job["root"], job["category"]
+        printed = job["printed"]
+        if result is not None:
+            if result.ok:
+                log.info("Signed %s: %s (Z %s)", stem, result.signature, result.z_no)
+            else:
+                log.warning("Fiscal signing of %s failed: %s", stem, result.error)
+                self.fiscal_failed.emit(stem, result.error)
+            printed = self._add_signature(printed, result)
+
         pdf_path = root / "pdf" / f"{stem}.pdf"
         json_path = root / "json" / f"{stem}.json"
         final_bin = root / "final" / f"{stem}.bin"
         final_pdf = root / "final" / f"{stem}.pdf"
-        # bin/ and pdf/ keep the job as received; final/ holds exactly what goes to the real printer.
-        bin_path.write_bytes(data)
         final_bin.write_bytes(printed)
         if self.forward_target.enabled:
             forward_async(self.forward_target, printed, stem)
@@ -229,27 +284,28 @@ class PrintServer(QObject):
             record = {
                 "job": stem,
                 "category": category,
-                "received": received.isoformat(timespec="seconds"),
+                "received": job["received"].isoformat(timespec="seconds"),
                 "client": peer,
                 "size_bytes": len(data),
                 "paper_mm": self.paper_mm,
                 "app": f"{APP_NAME} {__version__}",
                 "files": {
-                    "bin": f"bin/{bin_path.name}",
+                    "bin": f"bin/{stem}.bin",
                     "pdf": f"pdf/{pdf_path.name}",
                     "final_bin": f"final/{final_bin.name}",
                     "final_pdf": f"final/{final_pdf.name}",
                 },
-                "logo": Path(self.logo.path).name if receipt and self._logo_bytes else None,
-                "cut_added": cut_added,
-                "printer_reset_added": reset_added,
-                "line_end_added": line_end_added,
+                "logo": Path(self.logo.path).name if job["receipt"] and self._logo_bytes else None,
+                "fiscal": result.as_record(doc) if result is not None else None,
+                "cut_added": job["cut_added"],
+                "printer_reset_added": job["reset_added"],
+                "line_end_added": job["line_end_added"],
                 "line_count": len(lines),
                 "lines": {f"line_{i:03d}": text for i, text in enumerate(lines, 1)},
             }
             json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
 
-            self.renderer.render(received_elements, pdf_path)
+            self.renderer.render(job["received_elements"], pdf_path)
             if self.renderer.render(elements, final_pdf):
                 label = {"receipt": "Receipt", "zreport": "Z report"}.get(category, "Document")
                 log.info("%s from %s (%d bytes) -> %s", label, peer, len(data), stem)

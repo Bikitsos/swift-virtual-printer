@@ -79,6 +79,37 @@ It shows **Ready**, a warning (e.g. *30 or fewer daily zerosets left*), an error
 
 The status bar shows a **Fiscal** indicator. With *Check every 60 s* turned on (the default), a tray notification appears when the status changes. **Check now** checks immediately. Click **Apply & Restart** to save the fiscal settings.
 
+#### Signing receipts
+
+With **Sign receipts with the fiscal device before printing** ticked (RESTful API only, off by default), every **receipt** is signed before it is printed. Misc documents and Z reports are not signed, and Z reports are never issued automatically.
+
+1. The final receipt text (marker removed) is sent to `POST /sign_doc` as `{"doc": "..."}`.
+   - Lines are separated by `\r\n`.
+   - The logo and any other graphic become `[ΕΙΚΟΝΑ]`.
+   - Cuts and trailing blank lines are left out.
+   - Characters outside the Greek Windows code page 1253 become `?`, so the device doesn't reject the receipt.
+2. The app waits up to 10 seconds for the answer, without blocking the window.
+3. The signature block is printed after the last line of the receipt, before the paper feed and cut. It's centred and fits 80 mm and 58 mm paper:
+
+```
+------------------------------------------------
+                FISCAL SIGNATURE
+              6902AA9C38EC59C3AAB9
+              AF13282223FC63EC4B6E
+         Device: CP 00699030   Z: 0145
+      Sign: 00006 / 00585   28/04/23 03:18
+------------------------------------------------
+```
+
+If signing fails (driver not reachable, device disconnected, paper end, Z time limit, ...), the receipt still prints, with the text the Cy-Net manual requires:
+
+```
+THERE IS NO FISCAL SIGNATURE
+DUE TO FISCAL DEVICE FAILURE
+```
+
+A tray warning appears, the error is logged, and the job shows in **red as `(UNSIGNED)`** in the jobs list. The job's JSON gets a `"fiscal"` section with the `doc` that was sent and either the signature data (`signature`, `device_serial`, `z_no`, `daily_signatures`, `total_signatures`, `date`, `time`) or the `error`. On the command line: `--fiscal-sign [--fiscal-host 127.0.0.1] [--fiscal-port 9999]`.
+
 ### Service menu
 
 **Service → Service tools...** (also **Service...** in the tray menu) opens the administrative tools after you enter the service password. Ask your administrator for it. After 3 wrong attempts the menu is locked for 60 seconds.

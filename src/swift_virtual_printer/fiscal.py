@@ -117,6 +117,117 @@ def _rest_status(host: str, port: int, timeout: float = 8.0) -> FiscalStatus:
     return FiscalStatus(state, message, (f"{message} (code {result})",), details, source)
 
 
+# -- Signing (RESTful API sign_doc) --------------------------------------------------
+
+IMAGE_PLACEHOLDER = "[ΕΙΚΟΝΑ]"  # required by the driver wherever a graphic is printed
+DOC_ENCODING = "cp1253"  # Greek Windows code page, one of those the driver accepts
+NO_SIGNATURE_TEXT = ("THERE IS NO FISCAL SIGNATURE", "DUE TO FISCAL DEVICE FAILURE")
+
+
+@dataclass(frozen=True)
+class SignResult:
+    ok: bool
+    signature: str = ""
+    device_serial: str = ""
+    z_no: str = ""
+    daily_signatures: str = ""
+    total_signatures: str = ""
+    date: str = ""  # ddmmyy
+    time: str = ""  # hhmmss
+    error: str = ""
+
+    @property
+    def printed_datetime(self) -> str:
+        d, t = self.date, self.time
+        if len(d) == 6 and len(t) >= 4:
+            return f"{d[0:2]}/{d[2:4]}/{d[4:6]} {t[0:2]}:{t[2:4]}"
+        return f"{d} {t}".strip()
+
+    def as_record(self, doc: str) -> dict:
+        record = {"signed": self.ok, "doc": doc}
+        if self.ok:
+            record.update(
+                signature=self.signature, device_serial=self.device_serial, z_no=self.z_no,
+                daily_signatures=self.daily_signatures, total_signatures=self.total_signatures,
+                date=self.date, time=self.time,
+            )
+        else:
+            record["error"] = self.error
+        return record
+
+
+def build_doc(lines: list[str]) -> str:
+    """Printable text of a receipt for sign_doc: graphics become [ΕΙΚΟΝΑ], cuts and outer blank lines go."""
+    out = []
+    for line in lines:
+        if line.startswith(("[IMAGE", "[QR]", "[BARCODE")):
+            out.append(IMAGE_PLACEHOLDER)
+        elif line != "[CUT]":
+            out.append(line.rstrip())
+    while out and not out[-1]:
+        out.pop()
+    while out and not out[0]:
+        out.pop(0)
+    # Only characters the driver accepts; anything else would be rejected as a bad character.
+    text = "\r\n".join(out)
+    return text.encode(DOC_ENCODING, errors="replace").decode(DOC_ENCODING)
+
+
+def sign_document(host: str, port: int, doc: str, timeout: float = 10.0) -> SignResult:
+    request = urllib.request.Request(
+        f"http://{host}:{port}/sign_doc",
+        data=json.dumps({"doc": doc}, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        return SignResult(False, error=f"Driver returned HTTP {exc.code}")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return SignResult(False, error=f"Fiscal driver not reachable ({getattr(exc, 'reason', exc)})")
+    except ValueError:
+        return SignResult(False, error="Driver sent an invalid response")
+
+    result = int(body.get("result", -1))
+    info = body.get("details") or {}
+    if result != 0:
+        message = body.get("exresult") or REST_ERRORS.get(result, f"Error {result}")
+        return SignResult(False, error=f"{message} (code {result})")
+    signature = str(info.get("signature") or body.get("exresult") or "")
+    if not signature:
+        return SignResult(False, error="Driver returned no signature")
+    return SignResult(
+        True, signature, str(info.get("device_serial_no", "")), str(info.get("signature_z_no", "")),
+        str(info.get("daily_signatures", "")), str(info.get("total_signatures", "")),
+        str(info.get("date", "")), str(info.get("time", "")),
+    )
+
+
+def signature_lines(result: SignResult, width: int) -> list[str]:
+    """Text lines of the block printed under a receipt (centred by the printer)."""
+    rule = "-" * width
+    if not result.ok:
+        return [rule, *NO_SIGNATURE_TEXT, rule]
+    sig = result.signature
+    lines = [rule, "FISCAL SIGNATURE", sig[:20], sig[20:40]]
+    # Each entry is printed on one line if it fits the paper, otherwise one part per line.
+    for parts in (
+        (f"Device: {result.device_serial}", f"Z: {result.z_no}"),
+        (f"Sign: {result.daily_signatures} / {result.total_signatures}", result.printed_datetime),
+    ):
+        joined = "   ".join(p for p in parts if p)
+        lines.extend([joined] if len(joined) <= width else [p for p in parts if p])
+    return [line for line in lines if line] + [rule]
+
+
+def signature_escpos(result: SignResult, width: int) -> bytes:
+    """ESC/POS bytes for the signature block: normal font, centred, then left alignment again."""
+    text = "".join(f"{line[:width]}\n" for line in signature_lines(result, width))
+    return b"\x1b!\x00\x1d!\x00\x1dB\x00\x1ba\x01" + text.encode("ascii", errors="replace") + b"\x1ba\x00"
+
+
 # -- File-based driver -------------------------------------------------------------
 
 def _decode_flags(value: int, table: dict[int, str]) -> list[str]:

@@ -180,6 +180,11 @@ class EscPosParser:
         # True while text sits in the printer's line buffer without LF/ESC d/ESC J to print it
         # (FF doesn't count: real printers ignore it outside page mode).
         self.unterminated = False
+        # Byte offset just after the command that printed the last line with text, and its value at the
+        # first paper cut: where extra lines (e.g. a fiscal signature) can go before the feed and cut.
+        self.text_end: int | None = None
+        self.text_end_before_cut: int | None = None
+        self._line_has_text = False
         try:
             while self._pos < len(data):
                 self._step(self._u8())
@@ -225,6 +230,8 @@ class EscPosParser:
         self._line.append(item)
         self._line_width += width
         self.unterminated = True
+        if isinstance(item, InlineImage) or (isinstance(item, TextCell) and not item.char.isspace()):
+            self._line_has_text = True
 
     def _add_char(self, char: str) -> None:
         self._add_item(TextCell(char, self.style))
@@ -234,8 +241,15 @@ class EscPosParser:
             self.elements.append(Line(self._line, self.align, spacing))
         else:
             self.elements.append(Feed(spacing))
+        if self._line_has_text:
+            self.text_end = self._pos
+        self._line_has_text = False
         self._line = []
         self._line_width = 0
+
+    def _mark_cut(self) -> None:
+        if self.text_end_before_cut is None:
+            self.text_end_before_cut = self.text_end
 
     def _newline(self) -> None:
         self._print_line(self.spacing)
@@ -317,6 +331,7 @@ class EscPosParser:
             if offset < 0x8000:
                 self._add_item(Spacer(offset))
         elif c in (0x69, 0x6D):  # i / m cut
+            self._mark_cut()
             self._flush()
             self.elements.append(Cut())
         elif c == 0x70:  # p drawer kick
@@ -345,6 +360,7 @@ class EscPosParser:
         elif c == 0x56:  # V cut
             if self._u8() in (65, 66, 97, 98, 103, 104):
                 self._u8()
+            self._mark_cut()
             self._flush()
             self.elements.append(Cut())
         elif c == 0x76:  # v 0 raster image
