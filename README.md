@@ -58,17 +58,44 @@ uv run virtual-printer-gui --minimized  # start hidden in the tray
 ```
 
 - **Tray icon:** green means listening, grey means stopped. Click it to open the window.
-- **Right-click menu:** Show window, Open last job, Open jobs folder, Start/Stop printer, Quit.
-- Closing the window hides it to the tray. Use **Quit** to exit.
-- Settings are remembered between runs. Click **Apply & Restart** after changing them.
+- **Right-click menu:** Show window, Preview last job, Settings..., About, Quit... (Settings and Quit ask for the service password).
+- Closing the window hides it to the tray.
 - Receipts are saved in the `receipts` folder next to the app (see [Saved receipts](#saved-receipts)).
-- **Double-click** a job to open its **preview**. You can switch between *Final (as printed, with logo)* and *As received from the POS*, zoom in or out, **Reprint** it, or open the PDF.
-- **Right-click** a job for: Preview, Reprint, Open final PDF, Open PDF as received, Open JSON, Copy JSON path, Show in folder.
-- **Reprint** sends the job's final bytes (with the logo it was printed with) to the printer set on the **Forwarding** tab. Older jobs without a final copy are reprinted as received.
+
+#### Main window (for staff, touch friendly)
+
+The main window is made for everyday use on a touch screen, with large buttons and rows:
+
+- **Status cards** at the top: print service, real printer and fiscal device, plus the *Z due by* time when receipt signing is on (orange one hour before, red *Z OVERDUE*).
+- **Filter buttons:** *Receipts*, *Z reports*, *Unsigned (N)* (receipts not signed and failed fiscal Z reports) and *All documents* (including misc).
+- **Documents table:** time, type, status (*Printed*, *Signed*, *Re-signed*, *UNSIGNED*, *Z issued*, *Z (day already closed)*, *Z FAILED*), signature or error, and the job name. Tap to select (Ctrl/Shift for several), swipe to scroll, double-tap to preview.
+- **Preview** shows the receipt. You can switch between *Final (as printed, with logo)* and *As received from the POS*, zoom, **Reprint**, or open the PDF.
+- **Reprint** sends the final bytes to the real printer. Signed receipts get a large **COPY** at the top.
+- **Re-sign / Retry Z** signs unsigned receipts or retries a failed fiscal Z. With nothing selected on the *Unsigned* list, it does all of them. **Print after re-signing** prints them straight away.
+- **Issue Z...** closes the fiscal day on the Cy-Net (see [Issue Z](#fiscal-tools)).
+- Right-click (or press and hold) a row for: Preview, Reprint, Re-sign, Open final PDF, Open PDF as received, Open JSON, Copy JSON path, Show in folder.
+- The fiscal buttons are only shown when the fiscal device is connected through the RESTful API.
+
+#### Settings (password protected)
+
+**Settings** (top right, or in the tray menu) asks for the service password and opens the settings window, which is made for keyboard and mouse:
+
+| Page | Contents |
+| --- | --- |
+| Print service | Status, Start/Stop, Restart; listen address, port, idle timeout |
+| Documents | Paper width, paper cut, clean up jobs; receipt rule, Z report rule, **Test on selected document** |
+| Receipt printer | Forwarding to the real printer and its status |
+| Logo | Logo image, width, dither, preview |
+| Fiscal device | Connection, monitoring, receipt signing, automatic fiscal Z, status and the Z reminder, Show last Z, Resend sign files |
+| Storage | Receipts folder, open folders, disk usage, empty folders, delete old jobs |
+| Log | The log, Clear log, Copy diagnostics |
+| System | Version, updates, change password, reset settings, About, Quit |
+
+Click **Save & Restart service** to apply changes. Closing the window with unsaved changes asks whether to save or discard them.
 
 ### Fiscal device (Cy-Net 100)
 
-The **Fiscal** tab shows the status of a Cy-Net 100 fiscal device by asking its driver. The app only *reads* the status; it does not sign documents or issue Z reports.
+The **Fiscal device** settings page shows the status of a Cy-Net 100 fiscal device by asking its driver.
 
 | Connection | How | Settings |
 | --- | --- | --- |
@@ -77,7 +104,7 @@ The **Fiscal** tab shows the status of a Cy-Net 100 fiscal device by asking its 
 
 It shows **Ready**, a warning (e.g. *30 or fewer daily zerosets left*), an error (e.g. *Printer paper end detected*, *Z closure time limit*, *Paper end on device*) or *disconnected*, together with the device counters: last Z number, daily and total signatures, and remaining block signatures (REST); or daily signatures, total zerosets, device date/time, fiscal number and model (file driver). Error codes are translated using the tables in the Cy-Net 100 programmer's manual.
 
-The status bar shows a **Fiscal** indicator. With *Check every 60 s* turned on (the default), a tray notification appears when the status changes. **Check now** checks immediately. Click **Apply & Restart** to save the fiscal settings.
+The main window shows a **Fiscal** status card. With *Check every 60 s* turned on (the default), a tray notification appears when the status changes. **Check now** checks immediately. Click **Save & Restart service** to save the fiscal settings.
 
 #### Signing receipts
 
@@ -108,19 +135,19 @@ THERE IS NO FISCAL SIGNATURE
 DUE TO FISCAL DEVICE FAILURE
 ```
 
-A tray warning appears, the error is logged, and the job shows in **red as `(UNSIGNED)`** in the jobs list. The job's JSON gets a `"fiscal"` section with the `doc` that was sent and either the signature data (`signature`, `device_serial`, `z_no`, `daily_signatures`, `total_signatures`, `date`, `time`) or the `error`. On the command line: `--fiscal-sign [--fiscal-host 127.0.0.1] [--fiscal-port 9999]`.
+A tray warning appears, the error is logged, and the job shows in **red as UNSIGNED** in the main window. The job's JSON gets a `"fiscal"` section with the `doc` that was sent and either the signature data (`signature`, `device_serial`, `z_no`, `daily_signatures`, `total_signatures`, `date`, `time`) or the `error`. On the command line: `--fiscal-sign [--fiscal-host 127.0.0.1] [--fiscal-port 9999]`.
 
-#### Fiscal receipts tab (re-sign and copies)
+#### Re-sign and copies
 
-The **Fiscal receipts** tab, next to **Jobs**, lists every receipt that was sent for signing. You can filter it to *all*, *unsigned only* or *signed only*. Signed receipts are green (*Signed* or *Re-signed*, with the signature and the number of copies printed). Unsigned receipts are red (*UNSIGNED*, with the error).
+The main window lists every document. Signed receipts are green (*Signed* or *Re-signed*, with the signature and the number of copies printed). Unsigned receipts are red (*UNSIGNED*, with the error). The **Unsigned** button shows how many are waiting.
 
-- **Re-sign selected:** when the fiscal device is back online, select one or more unsigned receipts (or right-click an unsigned job in the Jobs list → *Re-sign with fiscal device*).
+- **Re-sign / Retry Z:** when the fiscal device is back online, select one or more unsigned receipts (or open the *Unsigned* list and select nothing to do all of them).
   - The exact same `doc` text is sent to `sign_doc` again.
   - On success, the *no fiscal signature* notice in the final receipt is replaced by the signature block.
   - The final `.bin`, final PDF and JSON are updated. The JSON gets `resigned` (time) and `first_error`.
   - With **Print after re-signing** ticked (the default), the signed receipt is printed straight away, without COPY, because it's the first signed print of that receipt.
-- **Reprint selected / Reprint:** a reprint of a **signed** receipt from the app gets a large, bold, centred **COPY** at the very top, and the JSON counts `copies_printed`. Reprints of unsigned receipts are printed unchanged.
-- **Preview** or double-click shows the final receipt.
+- **Reprint:** a reprint of a **signed** receipt from the app gets a large, bold, centred **COPY** at the very top, and the JSON counts `copies_printed`. Reprints of unsigned receipts are printed unchanged.
+- **Preview** or double-tap shows the final receipt.
 
 #### Fiscal Z (daily zeroset)
 
@@ -142,37 +169,29 @@ With **Issue the fiscal Z (daily zeroset) when the POS prints a Z report** ticke
 ------------------------------------------------
 ```
 
-If it fails, the Z report prints *THERE IS NO FISCAL SIGNATURE DUE TO FISCAL DEVICE FAILURE*. It appears as **Z FAILED** in the Fiscal receipts tab, and in the Jobs list as *(Z report, Z FAILED)*. Select it and click **Re-sign / retry Z** (or right-click → *Retry fiscal Z*) when the device is back. The same check prevents a second Z if the day was closed in the meantime. Z reports are listed with type *Z report* and status *Z issued*, *Z (day already closed)* or *Z FAILED*. Reprints of a fiscal Z report also get **COPY**. On the command line: `--fiscal-z`.
+If it fails, the Z report prints *THERE IS NO FISCAL SIGNATURE DUE TO FISCAL DEVICE FAILURE*. It appears in red as **Z FAILED** in the main window (also on the *Unsigned* list). Select it and click **Re-sign / retry Z** (or right-click → *Retry fiscal Z*) when the device is back. The same check prevents a second Z if the day was closed in the meantime. Z reports are listed with type *Z report* and status *Z issued*, *Z (day already closed)* or *Z FAILED*. Reprints of a fiscal Z report also get **COPY**. On the command line: `--fiscal-z`.
 
 #### Z deadline reminder and capacity warnings
 
-- **24-hour Z reminder.** The Cy-Net refuses to sign more than 24 hours after the first signature since the last Z (error 20, *Z closure time limit*). The Fiscal tab shows *Z report due by dd/mm hh:mm*, calculated from the first signed receipt since the last fiscal Z. The reminder is updated every minute and after every receipt.
-  - **One hour before:** it turns orange, the status bar shows *Z due hh:mm*, and a tray warning appears.
+- **24-hour Z reminder.** The Cy-Net refuses to sign more than 24 hours after the first signature since the last Z (error 20, *Z closure time limit*). The Fiscal device settings page shows *Z report due by dd/mm hh:mm*, calculated from the first signed receipt since the last fiscal Z. The reminder is updated every minute and after every receipt.
+  - **One hour before:** it turns orange in the main window's *Z due by* card, and a tray warning appears.
   - **When the deadline passes:** it turns red and shows *Z OVERDUE*, with another tray warning.
   - It is only active when receipt signing is on.
 - **Capacity warnings.** The fiscal status turns orange (warning) for *Only N signatures left in the current block* (RESTful API, 100 or fewer) and *30 or fewer daily zerosets left in fiscal memory* (file-based driver). *Fiscal memory full* and *Fiscal unit is full* are shown as errors.
 
-#### Fiscal tools in the Service menu
+#### Fiscal tools
 
-The password-protected **Service** dialog has a **Fiscal device** section (RESTful API only):
+These need the RESTful API connection:
 
-| Tool | What it does |
-| --- | --- |
-| **Issue Z now...** | Closes the fiscal day (`make_z`) when the POS can't. It asks for confirmation (it can't be undone) and warns about unsigned receipts from today. It uses the same double-Z guard as the automatic Z. A Z slip with the fiscal Z data is saved in `zreports/` and printed on the real printer. |
-| **Show last Z** | Shows the data of the last Z (`get_z`): Z number, signature, counters, date/time. |
-| **Resend sign files** | Asks the driver to resend its sign files (`resend_files`). |
+| Tool | Where | What it does |
+| --- | --- | --- |
+| **Issue Z...** | Main window | Closes the fiscal day (`make_z`) when the POS can't. It asks for confirmation (it can't be undone) and warns about unsigned receipts from today. It uses the same double-Z guard as the automatic Z. A Z slip with the fiscal Z data is saved in `zreports/` and printed on the real printer. |
+| **Show last Z** | Settings > Fiscal device | Shows the data of the last Z (`get_z`): Z number, signature, counters, date/time. |
+| **Resend sign files** | Settings > Fiscal device | Asks the driver to resend its sign files (`resend_files`). |
 
-### Service menu
+### Service password
 
-**Service → Service tools...** (also **Service...** in the tray menu) opens the administrative tools after you enter the service password. Ask your administrator for it. After 3 wrong attempts the menu is locked for 60 seconds.
-
-| Section | Tools |
-| --- | --- |
-| Print service | Restart, stop or start the print service; shows its current status |
-| Storage | File count and size of the `receipts` and `misc` folders; **Empty** either one, or delete jobs **older than N days** from both. Only job files are deleted; the folder structure is kept, and every deletion asks for confirmation. |
-| Maintenance | **Clear log**, **Copy diagnostics** (version, paths, settings and folder sizes, for support), **Reset settings** to defaults (jobs and password are kept), **Change password** |
-
-The password is stored only as a salted PBKDF2-SHA256 hash. A changed password is saved in the user's settings. The menu prevents casual changes by staff; it is not protection against someone with full access to the computer.
+The settings window and Quit ask for the service password. Ask your administrator for it. After 3 wrong attempts they are locked for 60 seconds. The password is changed on the **System** page. A changed password is saved in the user's settings. The menu prevents casual changes by staff; it is not protection against someone with full access to the computer.
 
 ### Updates
 
@@ -231,11 +250,11 @@ The POS marks real receipts with a marker text on a known line. The rule is set 
 | The line | is exactly the marker | Or *contains the marker*, when the marker is part of a longer line |
 | Remove the marker from the printout | on | The marker is removed from what's printed. The whole line goes when nothing else is printed on it. |
 
-**Test on selected job** checks both rules against a job selected in the jobs list. It shows where the job would go and lists its text lines: lines checked by the receipt rule are marked `>` and lines matched by the Z report rule are marked `Z`.
+**Test on selected document** checks both rules against the document selected in the main window (or the last one received). It shows where the job would go and lists its text lines: lines checked by the receipt rule are marked `>` and lines matched by the Z report rule are marked `Z`.
 
 ### Z reports
 
-**Detect Z reports** (on the Receipts tab, on by default) uses its own marker rule, with the same settings as above. The default is *any line contains* `Z REPORT`, and the marker is not removed. Z reports are checked **before** receipts. A job that matches is printed **without the logo** and saved in a `zreports` folder next to the `receipts` folder, with the same subfolders. If a Z report also carries the receipt marker, that marker is removed as well. Untick the group, or leave the marker empty, to turn detection off.
+**Detect Z reports** (on the Documents settings page, on by default) uses its own marker rule, with the same settings as above. The default is *any line contains* `Z REPORT`, and the marker is not removed. Z reports are checked **before** receipts. A job that matches is printed **without the logo** and saved in a `zreports` folder next to the `receipts` folder, with the same subfolders. If a Z report also carries the receipt marker, that marker is removed as well. Untick the group, or leave the marker empty, to turn detection off.
 
 | Job | What happens | Saved in |
 | --- | --- | --- |
@@ -243,7 +262,7 @@ The POS marks real receipts with a marker text on a known line. The rule is set 
 | Matches the receipt rule | The marker is removed (if enabled) and the [logo](#logo) is added. This is what's printed and saved as final. | `receipts/` |
 | Anything else (reports, kitchen tickets, test pages...) | Printed exactly as received, **without** the logo | `misc/` |
 
-All three kinds are forwarded to the real printer, shown in the jobs list (misc jobs greyed and marked `(misc)`, Z reports blue and marked `(Z report)`), and can be previewed and reprinted. The `misc` and `zreports` folders sit next to the `receipts` folder and have the same subfolders. The Service menu can empty each of them. The as-received copies in `bin/` and `pdf/` still contain the markers. Greek markers work with the Greek code pages (`ESC t` 14 / 15 / 47).
+All three kinds are forwarded to the real printer, shown in the main window (misc as type *Other* in grey, Z reports in blue), and can be previewed and reprinted. The `misc` and `zreports` folders sit next to the `receipts` folder and have the same subfolders. The Storage settings page can empty each of them. The as-received copies in `bin/` and `pdf/` still contain the markers. Greek markers work with the Greek code pages (`ESC t` 14 / 15 / 47).
 
 On the command line: `--receipt-marker TEXT`, `--marker-line N` (`0` = any line), `--marker-contains`, `--keep-marker`, `--zreport-marker TEXT` (empty = off), `--zreport-line N`, `--zreport-exact`.
 
@@ -287,7 +306,7 @@ In the JSON file, every printed line is a separate field. Images, barcodes, QR c
 
 ## Logo
 
-In the **Logo** box, tick **Print logo at the top of every receipt**, choose a PNG or JPG, set the width (as a percentage of the paper width) and click **Apply & Restart**. The preview shows exactly what the printer will print in black and white.
+On the **Logo** settings page, tick **Print logo at the top of every receipt**, choose a PNG or JPG, set the width (as a percentage of the paper width) and click **Save & Restart service**. The preview shows exactly what the printer will print in black and white.
 
 - The image is scaled to the chosen width. Transparent areas print white.
 - By default the image is converted to pure black and white: anything darker than 50% grey prints black. This works best for logos. Turn on **Dither** for photos or gradients.
@@ -314,7 +333,7 @@ The **Forwarding** tab shows whether the real printer is ready (**Check now** ch
 | Installed Windows printer with the **Epson Advanced Printer Driver** (e.g. TM-T88IV USB) | Epson Status API (`EpsStmApi.dll`) | offline/turned off, cover open, paper near end/out, cutter and other errors |
 | Other installed Windows printers | Windows print queue | paused, offline / "Use printer offline", paper problems, error, jobs stuck in the queue |
 
-The Forwarding tab shows which method was used (*via ...*). If the Epson Status API isn't installed, the app falls back to the Windows print queue. The queue is less precise: a USB printer that is switched off often shows up only once a job gets stuck.
+The Receipt printer settings page shows which method was used (*via ...*). If the Epson Status API isn't installed, the app falls back to the Windows print queue. The queue is less precise: a USB printer that is switched off often shows up only once a job gets stuck.
 
 ## Building a Windows exe
 

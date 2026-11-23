@@ -15,11 +15,12 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal, qVersion
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QIcon, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QItemSelectionModel, QObject, QSettings, Qt, QTimer, QUrl, Signal, qVersion
+from PySide6.QtGui import QCloseEvent, QColor, QDesktopServices, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -27,13 +28,14 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -41,12 +43,12 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QScrollArea,
+    QScroller,
     QSpinBox,
-    QSplitter,
+    QStackedWidget,
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -70,6 +72,19 @@ DEFAULT_OUTPUT = default_receipts_dir()
 LOGO_PREVIEW_WIDTH = 400
 PRINTER_CHECK_SECONDS = 30
 FISCAL_CHECK_SECONDS = 60
+
+# Large controls for the operator screen (touch); the settings window keeps the normal size.
+TOUCH_STYLE = """
+#touch QPushButton { min-height: 52px; min-width: 110px; font-size: 13pt; }
+#touch QPushButton:checked { background: #1565c0; color: white; border: 1px solid #0d47a1; border-radius: 4px; }
+#touch QCheckBox, #touch QComboBox { font-size: 12pt; min-height: 40px; }
+#touch QCheckBox::indicator { width: 26px; height: 26px; }
+#touch QTableWidget { font-size: 12pt; }
+#touch QHeaderView::section { font-size: 11pt; }
+#touch #card { border: 1px solid palette(mid); border-radius: 6px; }
+#touch #card QLabel { font-size: 11pt; }
+QMessageBox QPushButton { min-height: 40px; min-width: 100px; font-size: 11pt; }
+"""
 
 
 def _hint(text: str) -> QLabel:
@@ -158,6 +173,7 @@ class PreviewDialog(QDialog):
         super().__init__(window)
         self._window = window
         self.job = job
+        self.setObjectName("touch")
         self.setWindowTitle(f"Preview - {job.stem}")
         self.resize(560, 760)
 
@@ -190,7 +206,7 @@ class PreviewDialog(QDialog):
         reprint = buttons.addButton("Reprint", QDialogButtonBox.ButtonRole.ActionRole)
         reprint.setEnabled(job.print_bytes_path is not None)
         target = window.active_forward_target()
-        reprint.setToolTip(f"Send to {target}" if target.enabled else "Set up a real printer on the Forwarding tab first")
+        reprint.setToolTip(f"Send to {target}" if target.enabled else "No real printer is set up (Settings > Receipt printer)")
         reprint.clicked.connect(lambda: window.reprint_job(job))
         open_pdf = buttons.addButton("Open PDF", QDialogButtonBox.ButtonRole.ActionRole)
         open_pdf.setEnabled(job.best_pdf.exists())
@@ -237,31 +253,70 @@ class QtLogHandler(logging.Handler):
         self.emitter.message.emit(self.format(record))
 
 
-class ServiceDialog(QDialog):
-    """Administrative tools, shown after the service password has been entered."""
+class SettingsDialog(QDialog):
+    """All configuration and service tools, opened after the service password has been entered."""
 
-    def __init__(self, window: MainWindow) -> None:
+    def __init__(self, window: MainWindow, pages: list[tuple[str, QWidget]]) -> None:
         super().__init__(window)
         self._window = window
-        self.setWindowTitle("Service")
-        self.setMinimumWidth(520)
+        self.setWindowTitle(f"Settings - {APP_NAME}")
+        self.resize(960, 700)
+        pages = [*pages, ("Storage", self._build_storage_page()), ("Log", self._build_log_page()),
+                 ("System", self._build_system_page())]
 
-        self.status = QLabel()
-        self.status.setWordWrap(True)
-        restart = QPushButton("Restart service")
-        restart.clicked.connect(lambda: (window.restart_service(), self.refresh()))
-        stop = QPushButton("Stop")
-        stop.clicked.connect(lambda: (window.stop_server(), self.refresh()))
-        start = QPushButton("Start")
-        start.clicked.connect(lambda: (window.start_server(), self.refresh()))
-        service_buttons = QHBoxLayout()
-        service_buttons.addWidget(restart)
-        service_buttons.addWidget(stop)
-        service_buttons.addWidget(start)
-        service_box = QGroupBox("Print service")
-        service_layout = QVBoxLayout(service_box)
-        service_layout.addWidget(self.status)
-        service_layout.addLayout(service_buttons)
+        self.nav = QListWidget()
+        self.nav.setFixedWidth(180)
+        self.nav.setStyleSheet("QListWidget { font-size: 11pt; } QListWidget::item { padding: 8px 6px; }")
+        self.stack = QStackedWidget()
+        for title, page in pages:
+            self.nav.addItem(title)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(page)
+            self.stack.addWidget(scroll)
+        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.nav.setCurrentRow(0)
+
+        self.saved_label = _hint("")
+        save = QPushButton("Save && Restart service")
+        save.clicked.connect(self._save)
+        close = QPushButton("Close")
+        close.clicked.connect(self.reject)
+        for button in (save, close):
+            button.setAutoDefault(False)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.saved_label, 1)
+        buttons.addWidget(save)
+        buttons.addWidget(close)
+
+        body = QHBoxLayout()
+        body.addWidget(self.nav)
+        body.addWidget(self.stack, 1)
+        layout = QVBoxLayout(self)
+        layout.addLayout(body, 1)
+        layout.addLayout(buttons)
+
+    def _build_storage_page(self) -> QWidget:
+        window = self._window
+        browse = QPushButton("Browse...")
+        browse.clicked.connect(window._browse_output)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(window.output_edit, 1)
+        folder_row.addWidget(browse)
+        open_row = QHBoxLayout()
+        for title, slot in (("Open receipts", window.open_output_folder), ("Open Z reports", window.open_zreports_folder),
+                            ("Open misc", window.open_misc_folder)):
+            button = QPushButton(title)
+            button.clicked.connect(slot)
+            open_row.addWidget(button)
+        open_row.addStretch(1)
+        folders_box = QGroupBox("Folders")
+        folders_layout = QVBoxLayout(folders_box)
+        folders_layout.addWidget(_hint("Receipts are saved in this folder. Z reports and other documents go to the "
+                                       "zreports and misc folders next to it."))
+        folders_layout.addLayout(folder_row)
+        folders_layout.addLayout(open_row)
 
         storage = QFormLayout()
         self.usage_labels: dict[str, QLabel] = {}
@@ -283,50 +338,105 @@ class ServiceDialog(QDialog):
         older.addStretch(1)
         older.addWidget(delete_old)
         storage.addRow("Clean up", older)
-        storage_box = QGroupBox("Storage (bin, pdf, json and final files; folders are kept)")
+        storage_box = QGroupBox("Disk usage (bin, pdf, json and final files; folders are kept)")
         storage_box.setLayout(storage)
 
-        clear_log = QPushButton("Clear log")
-        clear_log.clicked.connect(window.log_view.clear)
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(folders_box)
+        layout.addWidget(storage_box)
+        layout.addStretch(1)
+        return page
+
+    def _build_log_page(self) -> QWidget:
+        window = self._window
+        window.log_view = QPlainTextEdit()
+        window.log_view.setReadOnly(True)
+        window.log_view.setMaximumBlockCount(1000)
+        clear = QPushButton("Clear log")
+        clear.clicked.connect(window.log_view.clear)
         diagnostics = QPushButton("Copy diagnostics")
         diagnostics.clicked.connect(window.copy_diagnostics)
-        reset = QPushButton("Reset settings...")
-        reset.clicked.connect(lambda: (window.reset_settings(), self.refresh()))
-        password = QPushButton("Change password...")
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(clear)
+        buttons.addWidget(diagnostics)
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(window.log_view, 1)
+        layout.addLayout(buttons)
+        return page
+
+    def _build_system_page(self) -> QWidget:
+        window = self._window
+        build_date, commit = build_info()
+        version = QLabel(f"{APP_NAME} {__version__} (build {build_date}{' ' + commit if commit else ''})")
+        window.auto_update_check = QCheckBox("Check for updates on startup")
+        window.auto_update_check.setChecked(window.settings.value("auto_update_check", True, type=bool))
+        window.auto_update_check.toggled.connect(lambda on: window.settings.setValue("auto_update_check", on))
+        check = QPushButton("Check for updates now")
+        check.clicked.connect(lambda: window.check_for_updates())
+        about = QPushButton("About")
+        about.clicked.connect(window.show_about)
+        update_row = QHBoxLayout()
+        update_row.addWidget(window.auto_update_check, 1)
+        update_row.addWidget(check)
+        update_row.addWidget(about)
+        updates_box = QGroupBox("Version and updates")
+        updates_layout = QVBoxLayout(updates_box)
+        updates_layout.addWidget(version)
+        updates_layout.addLayout(update_row)
+
+        password = QPushButton("Change service password...")
         password.clicked.connect(window.change_service_password)
-        maintenance = QHBoxLayout()
-        for button in (clear_log, diagnostics, reset, password):
-            maintenance.addWidget(button)
-        maintenance_box = QGroupBox("Maintenance")
-        maintenance_box.setLayout(maintenance)
+        reset = QPushButton("Reset all settings...")
+        reset.clicked.connect(lambda: (window.reset_settings(), self.refresh()))
+        quit_app = QPushButton("Quit application...")
+        quit_app.setToolTip("Stops the print service: the POS cannot print until the app is started again.")
+        quit_app.clicked.connect(self._quit)
+        admin_row = QHBoxLayout()
+        for button in (password, reset):
+            admin_row.addWidget(button)
+        admin_row.addStretch(1)
+        admin_row.addWidget(quit_app)
+        admin_box = QGroupBox("Administration")
+        admin_box.setLayout(admin_row)
 
-        issue_z = QPushButton("Issue Z now...")
-        issue_z.setToolTip("Close the fiscal day on the Cy-Net (make_z) and print the Z data.")
-        issue_z.clicked.connect(lambda: (window.issue_z_now(), self.refresh()))
-        last_z = QPushButton("Show last Z")
-        last_z.clicked.connect(window.show_last_z)
-        resend = QPushButton("Resend sign files")
-        resend.setToolTip("Ask the Cy-Net driver to resend its sign files (resend_files).")
-        resend.clicked.connect(window.resend_sign_files)
-        fiscal_tools = QHBoxLayout()
-        for button in (issue_z, last_z, resend):
-            fiscal_tools.addWidget(button)
-        fiscal_box = QGroupBox("Fiscal device (Cy-Net 100, RESTful API)")
-        fiscal_box.setLayout(fiscal_tools)
-        fiscal_box.setEnabled(window._fiscal_settings().mode == fiscal.REST)
-        if not fiscal_box.isEnabled():
-            fiscal_box.setToolTip("Choose the RESTful API connection on the Fiscal tab to use these tools.")
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(updates_box)
+        layout.addWidget(admin_box)
+        layout.addStretch(1)
+        return page
 
-        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        close.rejected.connect(self.reject)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(service_box)
-        layout.addWidget(storage_box)
-        layout.addWidget(fiscal_box)
-        layout.addWidget(maintenance_box)
-        layout.addWidget(close)
+    def _save(self) -> None:
+        self._window.apply_settings()
+        self.saved_label.setText(f"Saved at {time.strftime('%H:%M:%S')}. {self._window.status_label.text()}")
         self.refresh()
+
+    def _quit(self) -> None:
+        answer = QMessageBox.question(self, "Quit", "Quit the app? The POS cannot print until it is started again.")
+        if answer == QMessageBox.StandardButton.Yes:
+            self._window.quit()
+
+    def showEvent(self, event) -> None:
+        self.saved_label.setText("")
+        self.refresh()
+        super().showEvent(event)
+
+    def reject(self) -> None:
+        if self._window.settings_changed():
+            answer = QMessageBox.question(
+                self, "Settings", "Save the changes and restart the print service?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            )
+            if answer == QMessageBox.StandardButton.Cancel:
+                return
+            if answer == QMessageBox.StandardButton.Save:
+                self._window.apply_settings()
+            else:
+                self._window._load_settings()
+        super().reject()
 
     @staticmethod
     def _row(label: QLabel, button: QPushButton) -> QHBoxLayout:
@@ -336,7 +446,6 @@ class ServiceDialog(QDialog):
         return row
 
     def refresh(self) -> None:
-        self.status.setText(self._window.status_label.text())
         for name, root in self._window.job_roots:
             count, size = folder_usage(root)
             self.usage_labels[name].setText(f"{count} files, {format_size(size)}  -  {root}")
@@ -371,7 +480,7 @@ class MainWindow(QMainWindow):
     def __init__(self, log_emitter: LogEmitter) -> None:
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} {__version__}")
-        self.resize(1040, 640)
+        self.resize(1100, 700)
         self.settings = QSettings("SwiftVirtualPrinter", "VirtualPrinter")
         self.server: PrintServer | None = None
         self.last_job: Job | None = None
@@ -408,14 +517,13 @@ class MainWindow(QMainWindow):
         self._z_timer.start()
 
         self._build_ui()
-        self._build_menu()
         self._build_tray()
         self._load_settings()
         log_emitter.message.connect(self.log_view.appendPlainText)
         logging.info("%s %s (%s)", APP_NAME, __version__, build_info()[0])
         self.start_server()
         self.refresh_jobs()
-        if self.auto_update_action.isChecked():
+        if self.auto_update_check.isChecked():
             QTimer.singleShot(5000, lambda: self.check_for_updates(silent=True))
         QTimer.singleShot(2000, self.check_fiscal)
         QTimer.singleShot(2500, self.update_z_deadline)
@@ -423,118 +531,159 @@ class MainWindow(QMainWindow):
     # -- UI construction ----------------------------------------------------
 
     def _build_ui(self) -> None:
-        tabs = QTabWidget()
-        tabs.addTab(self._build_printer_tab(), "Printer")
-        tabs.addTab(self._build_receipt_tab(), "Receipts")
-        tabs.addTab(self._build_forward_tab(), "Forwarding")
-        tabs.addTab(self._build_logo_tab(), "Logo")
-        tabs.addTab(self._build_fiscal_tab(), "Fiscal")
+        self.setStyleSheet(TOUCH_STYLE)
+        self.output_edit = QLineEdit()
+        pages = [
+            ("Print service", self._build_service_page()),
+            ("Documents", self._build_documents_page()),
+            ("Receipt printer", self._build_forward_tab()),
+            ("Logo", self._build_logo_tab()),
+            ("Fiscal device", self._build_fiscal_tab()),
+        ]
         self.paper_combo.currentIndexChanged.connect(self._update_logo_preview)
-
-        self.toggle_button = QPushButton()
-        self.toggle_button.clicked.connect(self.toggle_server)
-        apply_button = QPushButton("Apply && Restart")
-        apply_button.setDefault(True)
-        apply_button.clicked.connect(self.apply_settings)
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        buttons.addWidget(self.toggle_button)
-        buttons.addWidget(apply_button)
-
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(tabs, 1)
-        left_layout.addLayout(buttons)
-
-        self.jobs_list = QListWidget()
-        self.jobs_list.itemDoubleClicked.connect(lambda item: self.preview_job(self._job_at(item)))
-        self.jobs_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.jobs_list.customContextMenuRequested.connect(self._show_job_menu)
-        open_folder = QPushButton("Receipts folder")
-        open_folder.clicked.connect(self.open_output_folder)
-        open_misc = QPushButton("Misc folder")
-        open_misc.clicked.connect(self.open_misc_folder)
-        open_zreports = QPushButton("Z reports")
-        open_zreports.clicked.connect(self.open_zreports_folder)
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.refresh_jobs)
-        jobs_buttons = QHBoxLayout()
-        jobs_buttons.addWidget(_hint("Double-click to preview, right-click to reprint or open files."), 1)
-        jobs_buttons.addWidget(refresh)
-        jobs_buttons.addWidget(open_folder)
-        jobs_buttons.addWidget(open_misc)
-        jobs_buttons.addWidget(open_zreports)
-        jobs_box = QWidget()
-        jobs_layout = QVBoxLayout(jobs_box)
-        jobs_layout.addWidget(self.jobs_list)
-        jobs_layout.addLayout(jobs_buttons)
-        self.job_tabs = QTabWidget()
-        self.job_tabs.addTab(jobs_box, "Jobs")
-        self.job_tabs.addTab(self._build_fiscal_receipts_tab(), "Fiscal receipts")
-        self.job_tabs.currentChanged.connect(lambda index: index == 1 and self.refresh_fiscal_receipts())
-
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(1000)
-        log_box = QGroupBox("Log")
-        QVBoxLayout(log_box).addWidget(self.log_view)
-
-        right = QSplitter(Qt.Orientation.Vertical)
-        right.addWidget(self.job_tabs)
-        right.addWidget(log_box)
-        right.setSizes([360, 220])
-
-        main = QSplitter(Qt.Orientation.Horizontal)
-        main.addWidget(left)
-        main.addWidget(right)
-        main.setStretchFactor(0, 0)
-        main.setStretchFactor(1, 1)
-        main.setSizes([480, 560])
-
-        central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.addWidget(main)
-        self.setCentralWidget(central)
+        self.settings_dialog = SettingsDialog(self, pages)
+        self.setCentralWidget(self._build_operator_view())
 
         self.statusBar().showMessage = self._flash  # type: ignore[method-assign]
-        self.status_dot = QLabel("\u25cf")
-        self.status_label = QLabel()
         self.flash_label = QLabel()
         self.flash_label.setStyleSheet("color: #1565c0;")
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self.flash_label.clear)
-        self.statusBar().addWidget(self.status_dot)
-        self.statusBar().addWidget(self.status_label)
         self.statusBar().addWidget(self.flash_label, 1)
-        self.printer_dot = QLabel("\u25cf")
-        self.printer_label = QLabel()
-        self.statusBar().addPermanentWidget(self.printer_dot)
-        self.statusBar().addPermanentWidget(self.printer_label)
-        self.fiscal_dot = QLabel("\u25cf")
-        self.fiscal_label = QLabel()
-        self.statusBar().addPermanentWidget(self.fiscal_dot)
-        self.statusBar().addPermanentWidget(self.fiscal_label)
-        self.z_due_status = QLabel()
-        self.statusBar().addPermanentWidget(self.z_due_status)
 
-    def _build_printer_tab(self) -> QWidget:
+    def _build_operator_view(self) -> QWidget:
+        """Touch-friendly screen for everyday use: status, documents, reprint, re-sign and Z."""
+        self.status_dot, self.printer_dot, self.fiscal_dot = QLabel("\u25cf"), QLabel("\u25cf"), QLabel("\u25cf")
+        self.status_label, self.printer_label, self.fiscal_label = QLabel(), QLabel(), QLabel()
+        header = QHBoxLayout()
+        for dot, label in ((self.status_dot, self.status_label), (self.printer_dot, self.printer_label),
+                           (self.fiscal_dot, self.fiscal_label)):
+            label.setWordWrap(True)
+            card = QFrame()
+            card.setObjectName("card")
+            row = QHBoxLayout(card)
+            row.addWidget(dot)
+            row.addWidget(label, 1)
+            header.addWidget(card, 1)
+        self.z_due_status = QLabel()
+        header.addWidget(self.z_due_status)
+        settings_button = QPushButton("Settings")
+        settings_button.setToolTip("Configuration and service tools (password protected)")
+        settings_button.clicked.connect(self.open_settings)
+        header.addWidget(settings_button)
+
+        filters = QHBoxLayout()
+        self.filter_buttons: dict[str, QPushButton] = {}
+        group = QButtonGroup(self)
+        for key, title in (("receipts", "Receipts"), ("zreports", "Z reports"), ("unsigned", "Unsigned"),
+                           ("all", "All documents")):
+            button = QPushButton(title)
+            button.setCheckable(True)
+            button.clicked.connect(lambda: self.refresh_jobs())
+            group.addButton(button)
+            filters.addWidget(button)
+            self.filter_buttons[key] = button
+        self.filter_buttons["receipts"].setChecked(True)
+        self.jobs_count = QLabel()
+        self.jobs_count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(lambda: self.refresh_jobs())
+        filters.addWidget(self.jobs_count, 1)
+        filters.addWidget(refresh)
+
+        table = self.jobs_table = QTableWidget(0, 5)
+        table.setHorizontalHeaderLabels(["Time", "Type", "Status", "Signature / details", "Document"])
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setWordWrap(False)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(46)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        table.doubleClicked.connect(lambda index: self.preview_job(self._job_at_row(index.row())))
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._show_job_menu)
+        QScroller.grabGesture(table.viewport(), QScroller.ScrollerGestureType.TouchGesture)
+
+        preview = QPushButton("Preview")
+        preview.clicked.connect(self.preview_selected)
+        reprint = QPushButton("Reprint")
+        reprint.setToolTip("Signed receipts are printed with a large COPY at the top.")
+        reprint.clicked.connect(self._reprint_selected)
+        self.resign_button = QPushButton("Re-sign / Retry Z")
+        self.resign_button.setToolTip("Sign unsigned receipts or retry a failed fiscal Z (the fiscal device must be online).")
+        self.resign_button.clicked.connect(self._resign_selected)
+        self.resign_print = QCheckBox("Print after re-signing")
+        self.resign_print.setChecked(True)
+        self.issue_z_button = QPushButton("Issue Z...")
+        self.issue_z_button.setToolTip("Close the fiscal day on the Cy-Net (make_z) and print the Z data.")
+        self.issue_z_button.clicked.connect(self.issue_z_now)
+        actions = QHBoxLayout()
+        actions.addWidget(preview)
+        actions.addWidget(reprint)
+        actions.addWidget(self.resign_button)
+        actions.addWidget(self.resign_print)
+        actions.addStretch(1)
+        actions.addWidget(self.issue_z_button)
+
+        page = QWidget()
+        page.setObjectName("touch")
+        layout = QVBoxLayout(page)
+        layout.addLayout(header)
+        layout.addLayout(filters)
+        layout.addWidget(table, 1)
+        layout.addLayout(actions)
+        layout.addWidget(_hint(
+            "Tap a row to select it, double-tap to preview. Reprints of signed receipts get a large COPY at the top. "
+            "Re-sign with nothing selected on the Unsigned list re-signs all of them."
+        ))
+        return page
+
+    def _build_service_page(self) -> QWidget:
         self.host_edit = QLineEdit()
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1, 65535)
-        self.paper_combo = QComboBox()
-        for key in PAPER_SIZES:
-            self.paper_combo.addItem(f"{key} mm", key)
-        self.output_edit = QLineEdit()
-        browse = QPushButton("Browse...")
-        browse.clicked.connect(self._browse_output)
-        output_row = QHBoxLayout()
-        output_row.addWidget(self.output_edit)
-        output_row.addWidget(browse)
         self.idle_spin = QDoubleSpinBox()
         self.idle_spin.setRange(1, 600)
         self.idle_spin.setSuffix(" s")
+        self.idle_spin.setToolTip("A job ends when the POS closes the connection or sends nothing for this long.")
+        form = QFormLayout()
+        form.addRow("Listen address", self.host_edit)
+        form.addRow("Port", self.port_spin)
+        form.addRow("Idle timeout", self.idle_spin)
+        network_box = QGroupBox("Network")
+        network_box.setLayout(form)
+
+        self.service_state = QLabel()
+        self.service_state.setWordWrap(True)
+        self.toggle_button = QPushButton()
+        self.toggle_button.clicked.connect(self.toggle_server)
+        restart = QPushButton("Restart")
+        restart.clicked.connect(self.restart_service)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.toggle_button)
+        buttons.addWidget(restart)
+        buttons.addStretch(1)
+        status_box = QGroupBox("Status")
+        status_layout = QVBoxLayout(status_box)
+        status_layout.addWidget(self.service_state)
+        status_layout.addLayout(buttons)
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(_hint("The POS software prints to this address and port (raw TCP, like a network receipt printer)."))
+        layout.addWidget(status_box)
+        layout.addWidget(network_box)
+        layout.addStretch(1)
+        return page
+
+    def _build_documents_page(self) -> QWidget:
+        self.paper_combo = QComboBox()
+        for key in PAPER_SIZES:
+            self.paper_combo.addItem(f"{key} mm", key)
         self.auto_cut_check = QCheckBox("Add a paper cut when the document has none")
         self.auto_cut_check.setToolTip("Appends an ESC/POS cut (GS V 66 0: feed to cutter, partial cut) to jobs without a cut.")
         self.clean_check = QCheckBox("Reset the printer before each job and finish an unprinted last line")
@@ -542,24 +691,44 @@ class MainWindow(QMainWindow):
             "Prepends ESC @ and adds a final line feed when needed. Fixes jobs from plain-text drivers "
             "(e.g. Windows 'Generic / Text Only' test pages) that don't cut and disturb the next receipt."
         )
+        paper_form = QFormLayout()
+        paper_form.addRow("Paper width", self.paper_combo)
+        paper_form.addRow("Paper cut", self.auto_cut_check)
+        paper_form.addRow("Clean up jobs", self.clean_check)
+        paper_box = QGroupBox("Paper and printing")
+        paper_box.setLayout(paper_form)
 
-        form = QFormLayout()
-        form.addRow("Listen address", self.host_edit)
-        form.addRow("Port", self.port_spin)
-        form.addRow("Paper width", self.paper_combo)
-        form.addRow("Receipts folder", output_row)
-        form.addRow("Idle timeout", self.idle_spin)
-        form.addRow("Paper cut", self.auto_cut_check)
-        form.addRow("Clean up jobs", self.clean_check)
+        self.marker_edit, self.marker_line, self.marker_mode, self.marker_remove, receipt_form = self._rule_widgets(
+            "empty = every job is a receipt"
+        )
+        receipt_box = QGroupBox("Receipts: logo added, saved in the receipts folder")
+        receipt_box.setLayout(receipt_form)
+
+        self.zreport_box = QGroupBox("Detect Z reports: no logo, saved in the zreports folder")
+        self.zreport_box.setCheckable(True)
+        self.zreport_edit, self.zreport_line, self.zreport_mode, self.zreport_remove, zreport_form = self._rule_widgets(
+            "e.g. Z REPORT"
+        )
+        self.zreport_box.setLayout(zreport_form)
+
+        test = QPushButton("Test on selected document")
+        test.setToolTip("Uses the document selected in the main window, or the last one received.")
+        test.clicked.connect(self.test_receipt_rule)
+        test_row = QHBoxLayout()
+        test_row.addStretch(1)
+        test_row.addWidget(test)
 
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.addWidget(paper_box)
         layout.addWidget(_hint(
-            "POS software prints to this address and port. Receipts (see the Receipts tab) get the logo and are "
-            "saved in the receipts folder; all other documents are printed without logo and saved in the misc "
-            "folder next to it."
+            "A job matches when the chosen printed text line (or any line) matches the marker. Blank lines and "
+            "images are not counted, so text line 1 is the first line with text. Z reports are checked first; "
+            "jobs that are neither go to the misc folder without logo."
         ))
-        layout.addLayout(form)
+        layout.addWidget(receipt_box)
+        layout.addWidget(self.zreport_box)
+        layout.addLayout(test_row)
         layout.addStretch(1)
         return page
 
@@ -583,39 +752,6 @@ class MainWindow(QMainWindow):
         form.addRow("", remove)
         return edit, line, mode, remove, form
 
-    def _build_receipt_tab(self) -> QWidget:
-        self.marker_edit, self.marker_line, self.marker_mode, self.marker_remove, receipt_form = self._rule_widgets(
-            "empty = every job is a receipt"
-        )
-        receipt_box = QGroupBox("Receipts: logo added, saved in the receipts folder")
-        receipt_box.setLayout(receipt_form)
-
-        self.zreport_box = QGroupBox("Detect Z reports: no logo, saved in the zreports folder")
-        self.zreport_box.setCheckable(True)
-        self.zreport_edit, self.zreport_line, self.zreport_mode, self.zreport_remove, zreport_form = self._rule_widgets(
-            "e.g. Z REPORT"
-        )
-        self.zreport_box.setLayout(zreport_form)
-
-        test = QPushButton("Test on selected job")
-        test.clicked.connect(self.test_receipt_rule)
-        test_row = QHBoxLayout()
-        test_row.addStretch(1)
-        test_row.addWidget(test)
-
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.addWidget(_hint(
-            "A job matches when the chosen printed text line (or any line) matches the marker. Blank lines and "
-            "images are not counted, so text line 1 is the first line with text. Z reports are checked first; "
-            "jobs that are neither go to the misc folder without logo."
-        ))
-        layout.addWidget(receipt_box)
-        layout.addWidget(self.zreport_box)
-        layout.addLayout(test_row)
-        layout.addStretch(1)
-        return page
-
     def _receipt_rule(self) -> ReceiptRule:
         return ReceiptRule(
             self.marker_edit.text(),
@@ -635,11 +771,10 @@ class MainWindow(QMainWindow):
         )
 
     def test_receipt_rule(self) -> None:
-        item = self.jobs_list.currentItem()
-        if item is None:
-            QMessageBox.information(self, "Test rules", "Select a job in the jobs list first.")
+        job = next(iter(self._selected_jobs()), self.last_job)
+        if job is None:
+            QMessageBox.information(self.settings_dialog, "Test rules", "No documents received yet.")
             return
-        job = self._job_at(item)
         if not job.bin.exists():
             QMessageBox.warning(self, "Test rules", f"No received data saved for {job.stem}.")
             return
@@ -760,12 +895,12 @@ class MainWindow(QMainWindow):
         self.fiscal_mode.currentIndexChanged.connect(self._update_fiscal_fields)
 
         self.fiscal_monitor = QCheckBox(f"Check every {FISCAL_CHECK_SECONDS} s and notify on problems")
-        self.fiscal_z = QCheckBox("Issue the fiscal Z (daily zeroset) when the POS prints a Z report (RESTful API)")
+        self.fiscal_z = QCheckBox("Issue the fiscal Z (daily zeroset) when the POS prints a Z report")
         self.fiscal_z.setToolTip(
             "When a job matches the Z report rule, make_z is called and the fiscal Z data is printed on the Z report. "
             "If no receipts were signed since the last Z, the day is not closed again: the last Z data is printed instead."
         )
-        self.fiscal_sign = QCheckBox("Sign receipts with the fiscal device before printing (RESTful API)")
+        self.fiscal_sign = QCheckBox("Sign receipts with the fiscal device before printing")
         self.fiscal_sign.setToolTip(
             "Each receipt is sent to sign_doc first; the signature block is printed at the bottom. "
             "If signing fails, the receipt prints with 'THERE IS NO FISCAL SIGNATURE DUE TO FISCAL DEVICE FAILURE'."
@@ -791,23 +926,44 @@ class MainWindow(QMainWindow):
         self.z_due_label.setWordWrap(True)
         status_layout.addWidget(self.z_due_label)
 
+        connection_box = QGroupBox("Connection to the Cy-Net 100 driver")
+        connection_layout = QVBoxLayout(connection_box)
+        connection_layout.addWidget(_hint(
+            "The RESTful API (default 127.0.0.1:9999) is needed for signing and the Z. "
+            "The file-based driver (FES32) only reads the status."
+        ))
+        connection_layout.addLayout(self.fiscal_form)
+        connection_layout.addLayout(check_row)
+
+        self.fiscal_auto_box = QGroupBox("Signing and Z (RESTful API)")
+        auto_layout = QVBoxLayout(self.fiscal_auto_box)
+        auto_layout.addWidget(self.fiscal_sign)
+        auto_layout.addWidget(self.fiscal_z)
+
+        last_z = QPushButton("Show last Z")
+        last_z.clicked.connect(self.show_last_z)
+        resend = QPushButton("Resend sign files")
+        resend.setToolTip("Ask the Cy-Net driver to resend its sign files (resend_files).")
+        resend.clicked.connect(self.resend_sign_files)
+        tools_row = QHBoxLayout()
+        tools_row.addWidget(last_z)
+        tools_row.addWidget(resend)
+        tools_row.addStretch(1)
+        self.fiscal_tools_box = QGroupBox("Tools (RESTful API)")
+        self.fiscal_tools_box.setLayout(tools_row)
+
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(_hint(
-            "Status of the Cy-Net 100 fiscal device, read through its driver: the RESTful API "
-            "(POST /check_system, default 127.0.0.1:9999) or the file-based driver (status command 'S')."
-        ))
-        layout.addLayout(self.fiscal_form)
-        layout.addLayout(check_row)
-        layout.addWidget(self.fiscal_sign)
-        layout.addWidget(self.fiscal_z)
+        layout.addWidget(connection_box)
+        layout.addWidget(self.fiscal_auto_box)
         layout.addWidget(status_box)
+        layout.addWidget(self.fiscal_tools_box)
         layout.addStretch(1)
         return page
 
     def _update_fiscal_fields(self) -> None:
-        self.fiscal_sign.setEnabled(self.fiscal_mode.currentData() == fiscal.REST)
-        self.fiscal_z.setEnabled(self.fiscal_mode.currentData() == fiscal.REST)
+        self.fiscal_auto_box.setEnabled(self.fiscal_mode.currentData() == fiscal.REST)
+        self.fiscal_tools_box.setEnabled(self.fiscal_mode.currentData() == fiscal.REST)
         mode = self.fiscal_mode.currentData()
         # Rows: 0 connection, 1 address, 2 port, 3 command folder, 4 answer folder.
         for row, visible in ((1, mode == fiscal.REST), (2, mode == fiscal.REST), (3, mode == fiscal.FILES), (4, mode == fiscal.FILES)):
@@ -913,35 +1069,18 @@ class MainWindow(QMainWindow):
         state = "" if self.logo_check.isChecked() else " - not enabled"
         self.logo_info.setText(f"{bitmap.width} \u00d7 {bitmap.height} dots on {paper} mm paper{state}")
 
-    def _build_menu(self) -> None:
-        file_menu = self.menuBar().addMenu("&File")
-        file_menu.addAction("Open receipts folder", self.open_output_folder)
-        file_menu.addAction("Open misc folder", self.open_misc_folder)
-        file_menu.addAction("Open Z reports folder", self.open_zreports_folder)
-        file_menu.addSeparator()
-        file_menu.addAction("Quit", self.quit)
-        service_menu = self.menuBar().addMenu("&Service")
-        service_menu.addAction("Service tools...", self.open_service)
-        help_menu = self.menuBar().addMenu("&Help")
-        help_menu.addAction("Check for updates...", self.check_for_updates)
-        self.auto_update_action = help_menu.addAction("Check for updates on startup")
-        self.auto_update_action.setCheckable(True)
-        self.auto_update_action.setChecked(self.settings.value("auto_update_check", True, type=bool))
-        self.auto_update_action.toggled.connect(lambda on: self.settings.setValue("auto_update_check", on))
-        help_menu.addSeparator()
-        help_menu.addAction("About", self.show_about)
-
     # -- service ------------------------------------------------------------
 
-    def open_service(self) -> None:
+    def _unlock(self, title: str) -> bool:
+        """Ask for the service password; after 3 wrong attempts, refuse for 60 seconds."""
         remaining = self._service_locked_until - time.monotonic()
         if remaining > 0:
-            QMessageBox.warning(self, "Service", f"Too many wrong passwords. Try again in {int(remaining) + 1} seconds.")
-            return
+            QMessageBox.warning(self, title, f"Too many wrong passwords. Try again in {int(remaining) + 1} seconds.")
+            return False
         self.show_window()
-        password, ok = QInputDialog.getText(self, "Service", "Service password:", QLineEdit.EchoMode.Password)
+        password, ok = QInputDialog.getText(self, title, "Service password:", QLineEdit.EchoMode.Password)
         if not ok:
-            return
+            return False
         stored = str(self.settings.value("service_password_hash", DEFAULT_PASSWORD_HASH))
         if not verify_password(password, stored):
             self._service_failures += 1
@@ -949,11 +1088,24 @@ class MainWindow(QMainWindow):
             if self._service_failures >= 3:
                 self._service_failures = 0
                 self._service_locked_until = time.monotonic() + 60
-            QMessageBox.warning(self, "Service", "Wrong password.")
-            return
+            QMessageBox.warning(self, title, "Wrong password.")
+            return False
         self._service_failures = 0
-        logging.info("Service: menu opened")
-        ServiceDialog(self).exec()
+        return True
+
+    def open_settings(self) -> None:
+        if self.settings_dialog.isVisible():
+            self.settings_dialog.raise_()
+            self.settings_dialog.activateWindow()
+            return
+        if not self._unlock("Settings"):
+            return
+        logging.info("Service: settings opened")
+        self.settings_dialog.exec()
+
+    def request_quit(self) -> None:
+        if self._unlock("Quit"):
+            self.quit()
 
     def restart_service(self) -> None:
         logging.info("Service: restarting print service")
@@ -972,7 +1124,7 @@ class MainWindow(QMainWindow):
         if password_hash:
             self.settings.setValue("service_password_hash", password_hash)
         self._load_settings()
-        self.auto_update_action.setChecked(True)
+        self.auto_update_check.setChecked(True)
         logging.info("Service: settings reset to defaults")
         self.start_server()
         self.refresh_jobs()
@@ -1077,8 +1229,8 @@ class MainWindow(QMainWindow):
             text = f"Z report due by {deadline:%d/%m %H:%M}."
         self.z_due_label.setText(text)
         self.z_due_label.setStyleSheet(f"color: {color}; font-weight: bold;")
-        self.z_due_status.setText(f"Z due {deadline:%H:%M}" if level == "soon" else "Z OVERDUE" if level == "overdue" else "")
-        self.z_due_status.setStyleSheet(f"color: {color}; font-weight: bold;")
+        self.z_due_status.setText("Z OVERDUE" if level == "overdue" else f"Z due by\n{deadline:%d/%m %H:%M}")
+        self.z_due_status.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 12pt;")
         if level != "ok" and self._z_warned != (deadline, level):
             self._z_warned = (deadline, level)
             logging.warning("%s", text)
@@ -1099,7 +1251,8 @@ class MainWindow(QMainWindow):
     def _fiscal_rest(self, title: str) -> FiscalSettings | None:
         settings = self._fiscal_settings()
         if settings.mode != fiscal.REST:
-            QMessageBox.information(self, title, "Choose the RESTful API connection on the Fiscal tab first.")
+            QMessageBox.information(self, title, "The fiscal device is not connected through the RESTful API "
+                                                 "(Settings > Fiscal device).")
             return None
         return settings
 
@@ -1148,11 +1301,11 @@ class MainWindow(QMainWindow):
         )
 
     def _save_manual_z(self, result: fiscal.SignResult) -> Job:
-        """Save (and print) a Z slip for a Z issued from the Service menu, like a POS Z report."""
+        """Save (and print) a Z slip for a manually issued Z, like a POS Z report."""
         paper_mm, paper_dots = PAPER_SIZES[self.paper_combo.currentData()]
         now = datetime.now()
         job = Job(self.zreports_dir, f"job_{now:%Y%m%d_%H%M%S}_9999")
-        header = b"\x1b@\x1ba\x01\x1bE\x01\x1d!\x11Z REPORT\n\x1d!\x00\x1bE\x00Issued from the Service menu\n\x1ba\x00"
+        header = b"\x1b@\x1ba\x01\x1bE\x01\x1d!\x11Z REPORT\n\x1d!\x00\x1bE\x00Issued manually\n\x1ba\x00"
         data = header + fiscal.signature_escpos(result, fiscal.chars_per_line(paper_dots)) + b"\n\n\n" + AUTO_CUT
         for name in SUBFOLDERS:
             (job.root / name).mkdir(parents=True, exist_ok=True)
@@ -1165,7 +1318,7 @@ class MainWindow(QMainWindow):
         lines = elements_to_lines(elements)
         record = {
             "job": job.stem, "category": "zreport", "received": now.isoformat(timespec="seconds"),
-            "client": "Service menu", "size_bytes": len(data), "paper_mm": paper_mm, "app": f"{APP_NAME} {__version__}",
+            "client": "Manual Z", "size_bytes": len(data), "paper_mm": paper_mm, "app": f"{APP_NAME} {__version__}",
             "files": {"bin": f"bin/{job.stem}.bin", "pdf": f"pdf/{job.stem}.pdf",
                       "final_bin": f"final/{job.stem}.bin", "final_pdf": f"final/{job.stem}.pdf"},
             "logo": None, "fiscal": result.as_record(""),
@@ -1176,7 +1329,6 @@ class MainWindow(QMainWindow):
         if target.enabled:
             forward_async(target, data, job.stem)
         self.refresh_jobs()
-        self.refresh_fiscal_receipts()
         return job
 
     def show_last_z(self) -> None:
@@ -1320,16 +1472,10 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Show window", self.show_window)
         menu.addAction("Preview last job", self.preview_last_job)
-        menu.addAction("Open receipts folder", self.open_output_folder)
-        menu.addAction("Open misc folder", self.open_misc_folder)
-        menu.addAction("Open Z reports folder", self.open_zreports_folder)
         menu.addSeparator()
-        self.tray_toggle: QAction = menu.addAction("Stop printer", self.toggle_server)
-        menu.addSeparator()
-        menu.addAction("Check for updates...", self.check_for_updates)
-        menu.addAction("Service...", self.open_service)
+        menu.addAction("Settings...", self.open_settings)
         menu.addAction("About", self.show_about)
-        menu.addAction("Quit", self.quit)
+        menu.addAction("Quit...", self.request_quit)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.messageClicked.connect(lambda: self._tray_click())
@@ -1375,42 +1521,53 @@ class MainWindow(QMainWindow):
         self.zreport_mode.setCurrentIndex(1 if s.value("zreport_contains", True, type=bool) else 0)
         self.zreport_remove.setChecked(s.value("zreport_remove", False, type=bool))
         self._update_logo_preview()
+        self._loaded_settings = self._collect_settings()
+
+    def _collect_settings(self) -> dict:
+        return {
+            "host": self.host_edit.text().strip(),
+            "port": self.port_spin.value(),
+            "paper": self.paper_combo.currentData(),
+            "receipts_dir": self.output_edit.text().strip(),
+            "idle_timeout": self.idle_spin.value(),
+            "auto_cut": self.auto_cut_check.isChecked(),
+            "clean_jobs": self.clean_check.isChecked(),
+            "forward_mode": self.forward_mode.currentData(),
+            "forward_host": self.forward_host.text().strip(),
+            "forward_port": self.forward_port.value(),
+            "forward_printer": self.forward_printer.currentText().strip(),
+            "logo_enabled": self.logo_check.isChecked(),
+            "logo_path": self.logo_path.text().strip(),
+            "logo_width": self.logo_width.value(),
+            "logo_dither": self.logo_dither.isChecked(),
+            "monitor_printer": self.monitor_check.isChecked(),
+            "fiscal_mode": self.fiscal_mode.currentData(),
+            "fiscal_host": self.fiscal_host.text().strip(),
+            "fiscal_port": self.fiscal_port.value(),
+            "fiscal_command_dir": self.fiscal_command_dir.text().strip(),
+            "fiscal_answer_dir": self.fiscal_answer_dir.text().strip(),
+            "fiscal_monitor": self.fiscal_monitor.isChecked(),
+            "fiscal_sign": self.fiscal_sign.isChecked(),
+            "fiscal_z": self.fiscal_z.isChecked(),
+            "marker_pattern": self.marker_edit.text(),
+            "marker_line": self.marker_line.value(),
+            "marker_contains": bool(self.marker_mode.currentData()),
+            "marker_remove": self.marker_remove.isChecked(),
+            "zreport_enabled": self.zreport_box.isChecked(),
+            "zreport_pattern": self.zreport_edit.text(),
+            "zreport_line": self.zreport_line.value(),
+            "zreport_contains": bool(self.zreport_mode.currentData()),
+            "zreport_remove": self.zreport_remove.isChecked(),
+        }
+
+    def settings_changed(self) -> bool:
+        return self._collect_settings() != self._loaded_settings
 
     def _save_settings(self) -> None:
-        s = self.settings
-        s.setValue("host", self.host_edit.text().strip())
-        s.setValue("port", self.port_spin.value())
-        s.setValue("paper", self.paper_combo.currentData())
-        s.setValue("receipts_dir", self.output_edit.text().strip())
-        s.setValue("idle_timeout", self.idle_spin.value())
-        s.setValue("auto_cut", self.auto_cut_check.isChecked())
-        s.setValue("clean_jobs", self.clean_check.isChecked())
-        s.setValue("forward_mode", self.forward_mode.currentData())
-        s.setValue("forward_host", self.forward_host.text().strip())
-        s.setValue("forward_port", self.forward_port.value())
-        s.setValue("forward_printer", self.forward_printer.currentText().strip())
-        s.setValue("logo_enabled", self.logo_check.isChecked())
-        s.setValue("logo_path", self.logo_path.text().strip())
-        s.setValue("logo_width", self.logo_width.value())
-        s.setValue("logo_dither", self.logo_dither.isChecked())
-        s.setValue("monitor_printer", self.monitor_check.isChecked())
-        s.setValue("fiscal_mode", self.fiscal_mode.currentData())
-        s.setValue("fiscal_host", self.fiscal_host.text().strip())
-        s.setValue("fiscal_port", self.fiscal_port.value())
-        s.setValue("fiscal_command_dir", self.fiscal_command_dir.text().strip())
-        s.setValue("fiscal_answer_dir", self.fiscal_answer_dir.text().strip())
-        s.setValue("fiscal_monitor", self.fiscal_monitor.isChecked())
-        s.setValue("fiscal_sign", self.fiscal_sign.isChecked())
-        s.setValue("fiscal_z", self.fiscal_z.isChecked())
-        s.setValue("marker_pattern", self.marker_edit.text())
-        s.setValue("marker_line", self.marker_line.value())
-        s.setValue("marker_contains", bool(self.marker_mode.currentData()))
-        s.setValue("marker_remove", self.marker_remove.isChecked())
-        s.setValue("zreport_enabled", self.zreport_box.isChecked())
-        s.setValue("zreport_pattern", self.zreport_edit.text())
-        s.setValue("zreport_line", self.zreport_line.value())
-        s.setValue("zreport_contains", bool(self.zreport_mode.currentData()))
-        s.setValue("zreport_remove", self.zreport_remove.isChecked())
+        values = self._collect_settings()
+        for key, value in values.items():
+            self.settings.setValue(key, value)
+        self._loaded_settings = values
 
     def _browse_output(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Receipts folder", self.output_edit.text())
@@ -1430,6 +1587,9 @@ class MainWindow(QMainWindow):
 
     def start_server(self) -> None:
         self.stop_server()
+        rest = self._fiscal_settings().mode == fiscal.REST
+        for widget in (self.resign_button, self.resign_print, self.issue_z_button):
+            widget.setVisible(rest)
         paper_mm, paper_dots = PAPER_SIZES[self.paper_combo.currentData()]
         server = PrintServer(
             self.host_edit.text().strip() or "0.0.0.0",
@@ -1493,62 +1653,107 @@ class MainWindow(QMainWindow):
         else:
             text = f"Stopped: {error}" if error else "Stopped"
         self.status_label.setText(text)
-        self.status_dot.setStyleSheet(f"font-size: 14pt; color: {'#2e7d32' if running else '#c62828' if error else '#9e9e9e'};")
+        color = "#2e7d32" if running else "#c62828" if error else "#9e9e9e"
+        self.status_dot.setStyleSheet(f"font-size: 14pt; color: {color};")
+        self.service_state.setText(text)
+        self.service_state.setStyleSheet(f"font-size: 12pt; font-weight: bold; color: {color};")
         self.toggle_button.setText("Stop" if running else "Start")
-        self.tray_toggle.setText("Stop printer" if running else "Start printer")
         self.tray.setIcon(self._icon_on if running else self._icon_off)
         self.tray.setToolTip(f"{APP_NAME} {__version__}\n{text}")
 
     # -- jobs ---------------------------------------------------------------
 
-    def _job_at(self, item: QListWidgetItem) -> Job:
-        return item.data(Qt.ItemDataRole.UserRole)
+    def _job_at_row(self, row: int) -> Job:
+        return self.jobs_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
 
-    def _add_job_item(self, job: Job, top: bool = False) -> None:
-        tag = {self.misc_dir: "    (misc)", self.zreports_dir: "    (Z report)"}.get(job.root, "")
-        fiscal_record = _fiscal_record(job) if job.root in (self.output_dir, self.zreports_dir) else None
-        unsigned = bool(fiscal_record) and not fiscal_record.get("signed")
-        if unsigned:
-            tag = "    (Z report, Z FAILED)" if job.root == self.zreports_dir else "    (UNSIGNED)"
-        item = QListWidgetItem(job.stem + tag)
-        item.setData(Qt.ItemDataRole.UserRole, job)
-        item.setToolTip(str(job.best_pdf) + (f"\nNot signed: {fiscal_record.get('error', '')}" if unsigned else ""))
-        if unsigned:
-            item.setForeground(QColor("#c62828"))
-        elif job.root == self.misc_dir:
-            item.setForeground(QColor("#777777"))
-        elif job.root == self.zreports_dir:
-            item.setForeground(QColor("#1565c0"))
-        if top:
-            self.jobs_list.insertItem(0, item)
+    def _selected_jobs(self) -> list[Job]:
+        rows = sorted({index.row() for index in self.jobs_table.selectionModel().selectedRows()})
+        return [self._job_at_row(row) for row in rows]
+
+    def _describe(self, job: Job, fiscal_record: dict | None) -> tuple[str, str, str, str]:
+        """Type, status, details and colour of a row in the documents table."""
+        if job.root == self.misc_dir:
+            return "Other", "Printed", "", "#777777"
+        is_z = job.root == self.zreports_dir
+        kind = "Z report" if is_z else "Receipt"
+        if not fiscal_record:
+            return kind, "Printed", "", "#1565c0" if is_z else ""
+        if not fiscal_record.get("signed"):
+            return kind, "Z FAILED" if is_z else "UNSIGNED", fiscal_record.get("error", ""), "#c62828"
+        if is_z:
+            status = "Z (day already closed)" if fiscal_record.get("note") else "Z issued"
         else:
-            self.jobs_list.addItem(item)
+            status = "Re-signed" if fiscal_record.get("resigned") else "Signed"
+        detail = fiscal_record.get("signature", "")
+        if is_z and fiscal_record.get("z_no"):
+            detail = f"Z {fiscal_record['z_no']}   {detail}"
+        copies = fiscal_record.get("copies_printed", 0)
+        if copies:
+            detail += f"   ({copies} cop{'y' if copies == 1 else 'ies'} printed)"
+        return kind, status, detail, "#2e7d32"
 
     def refresh_jobs(self) -> None:
-        self.jobs_list.clear()
-        found: dict[Job, float] = {}
+        wanted = next((key for key, button in self.filter_buttons.items() if button.isChecked()), "all")
+        selected = set(self._selected_jobs())
+        entries = []
         for _, root in self.job_roots:
-            for folder in ("pdf", "final"):
-                directory = root / folder
-                if directory.is_dir():
-                    for path in directory.glob("*.pdf"):
-                        job = Job(root, path.stem)
-                        found[job] = max(found.get(job, 0.0), path.stat().st_mtime)
-        jobs = sorted(found, key=found.get, reverse=True)
-        for job in jobs[:500]:
-            self._add_job_item(job)
-        if jobs and self.last_job is None:
-            self.last_job = jobs[0]
+            json_dir = root / "json"
+            if json_dir.is_dir():
+                entries += [(path.stem, root, path) for path in json_dir.glob("*.json")]
+        entries.sort(key=lambda entry: entry[0], reverse=True)
+        if entries and self.last_job is None:
+            self.last_job = Job(entries[0][1], entries[0][0])
+
+        rows, unsigned_total = [], 0
+        for stem, root, path in entries[:2000]:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            fiscal_record = record.get("fiscal") if root != self.misc_dir else None
+            unsigned = bool(fiscal_record) and not fiscal_record.get("signed")
+            unsigned_total += unsigned
+            shown = {"receipts": root == self.output_dir, "zreports": root == self.zreports_dir,
+                     "unsigned": unsigned}.get(wanted, True)
+            if shown and len(rows) < 500:
+                rows.append((Job(root, stem), record, fiscal_record))
+
+        table = self.jobs_table
+        table.setRowCount(0)
+        table.setRowCount(len(rows))
+        for row, (job, record, fiscal_record) in enumerate(rows):
+            kind, status, detail, color = self._describe(job, fiscal_record)
+            received = record.get("received", "")
+            try:
+                when = datetime.fromisoformat(received).strftime("%d/%m  %H:%M:%S")
+            except ValueError:
+                when = received
+            for column, value in enumerate((when, kind, status, detail, job.stem)):
+                item = QTableWidgetItem(value)
+                if color:
+                    item.setForeground(QColor(color))
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, job)
+                elif column == 2:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                table.setItem(row, column, item)
+            if job in selected:
+                table.selectionModel().select(
+                    table.model().index(row, 0),
+                    QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+                )
+        self.filter_buttons["unsigned"].setText(f"Unsigned ({unsigned_total})" if unsigned_total else "Unsigned")
+        self.jobs_count.setText(f"{len(rows)} shown")
 
     def _on_job_saved(self, path: Path) -> None:
         job = Job(path.parent.parent, path.stem)
         self.last_job = job
         self._tray_click = self.preview_last_job
-        self._add_job_item(job, top=True)
+        self.refresh_jobs()
         if job.root in (self.output_dir, self.zreports_dir):
             self.update_z_deadline()
-        if job.root == self.output_dir and self.job_tabs.currentIndex() == 1:
-            self.refresh_fiscal_receipts()
         kind = {self.misc_dir: "Document (misc)", self.zreports_dir: "Z report"}.get(job.root, "Receipt")
         self.tray.showMessage(f"{kind} received", f"{path.stem}\nClick to preview.", QSystemTrayIcon.MessageIcon.Information, 4000)
 
@@ -1556,10 +1761,10 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _show_job_menu(self, pos) -> None:
-        item = self.jobs_list.itemAt(pos)
+        item = self.jobs_table.itemAt(pos)
         if not item:
             return
-        job = self._job_at(item)
+        job = self._job_at_row(item.row())
         menu = QMenu(self)
         menu.addAction("Preview", lambda: self.preview_job(job))
         menu.addAction("Reprint", lambda: self.reprint_job(job)).setEnabled(job.print_bytes_path is not None)
@@ -1574,7 +1779,7 @@ class MainWindow(QMainWindow):
         menu.addAction("Copy JSON path", lambda: QApplication.clipboard().setText(str(job.json))).setEnabled(job.json.exists())
         menu.addSeparator()
         menu.addAction("Show in folder", lambda: self._open_path(job.best_pdf.parent))
-        menu.exec(self.jobs_list.viewport().mapToGlobal(pos))
+        menu.exec(self.jobs_table.viewport().mapToGlobal(pos))
 
     def preview_job(self, job: Job) -> None:
         PreviewDialog(self, job).exec()
@@ -1592,7 +1797,7 @@ class MainWindow(QMainWindow):
         target = self.active_forward_target()
         if not target.enabled:
             QMessageBox.information(
-                self, "Reprint", "No real printer is set up.\n\nChoose one on the Forwarding tab and click Apply && Restart."
+                self, "Reprint", "No real printer is set up (Settings > Receipt printer)."
             )
             return
         path = job.print_bytes_path
@@ -1616,129 +1821,35 @@ class MainWindow(QMainWindow):
 
     def _flash(self, message: str, timeout: int = 0) -> None:
         """Temporary status-bar message, shown next to (not over) the service status."""
-        self.flash_label.setText(f"   |   {message}" if message else "")
+        self.flash_label.setText(message)
         if timeout:
             self._flash_timer.start(timeout)
         else:
             self._flash_timer.stop()
 
-    # -- fiscal receipts (signed / unsigned) ---------------------------------
+    # -- operator actions -----------------------------------------------------
 
-    def _build_fiscal_receipts_tab(self) -> QWidget:
-        self.fiscal_filter = QComboBox()
-        self.fiscal_filter.addItem("All signed and unsigned receipts", "all")
-        self.fiscal_filter.addItem("Unsigned only", "unsigned")
-        self.fiscal_filter.addItem("Signed only", "signed")
-        self.fiscal_filter.currentIndexChanged.connect(self.refresh_fiscal_receipts)
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.refresh_fiscal_receipts)
-        self.fiscal_count = QLabel()
-        top = QHBoxLayout()
-        top.addWidget(self.fiscal_filter)
-        top.addWidget(self.fiscal_count, 1)
-        top.addWidget(refresh)
-
-        self.fiscal_table = QTableWidget(0, 5)
-        self.fiscal_table.setHorizontalHeaderLabels(["Received", "Type", "Document", "Status", "Signature / error"])
-        self.fiscal_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.fiscal_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.fiscal_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.fiscal_table.verticalHeader().setVisible(False)
-        self.fiscal_table.horizontalHeader().setStretchLastSection(True)
-        self.fiscal_table.doubleClicked.connect(lambda index: self.preview_job(self._fiscal_job_at(index.row())))
-
-        resign = QPushButton("Re-sign / retry Z")
-        resign.setToolTip("Sign unsigned receipts or retry a failed fiscal Z now (the fiscal device must be online).")
-        resign.clicked.connect(lambda: self.resign_jobs(self._selected_fiscal_jobs()))
-        self.resign_print = QCheckBox("Print after re-signing")
-        self.resign_print.setChecked(True)
-        reprint = QPushButton("Reprint selected")
-        reprint.setToolTip("Signed receipts are printed with a large COPY at the top.")
-        reprint.clicked.connect(self._reprint_selected_fiscal)
-        preview = QPushButton("Preview")
-        preview.clicked.connect(
-            lambda: (jobs := self._selected_fiscal_jobs()) and self.preview_job(jobs[0])
-        )
-        buttons = QHBoxLayout()
-        buttons.addWidget(resign)
-        buttons.addWidget(self.resign_print)
-        buttons.addStretch(1)
-        buttons.addWidget(preview)
-        buttons.addWidget(reprint)
-
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.addLayout(top)
-        layout.addWidget(self.fiscal_table, 1)
-        layout.addLayout(buttons)
-        layout.addWidget(_hint("Reprints of signed receipts get a large COPY at the top. Re-signed receipts are printed "
-                               "without COPY the first time, since the original printed without a signature."))
-        return page
-
-    def refresh_fiscal_receipts(self) -> None:
-        wanted = self.fiscal_filter.currentData()
-        rows = []
-        paths = []
-        for root in (self.output_dir, self.zreports_dir):
-            json_dir = root / "json"
-            if json_dir.is_dir():
-                paths += [(path.stem, root, path) for path in json_dir.glob("*.json")]
-        for stem, root, path in sorted(paths, reverse=True)[:2000]:
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            fiscal_record = record.get("fiscal")
-            if not fiscal_record:
-                continue
-            signed = bool(fiscal_record.get("signed"))
-            if wanted == "all" or (wanted == "signed") == signed:
-                rows.append((Job(root, stem), record, fiscal_record, signed))
-
-        self.fiscal_table.setRowCount(0)
-        unsigned_total = sum(1 for *_, signed in rows if not signed)
-        for job, record, fiscal_record, signed in rows:
-            row = self.fiscal_table.rowCount()
-            self.fiscal_table.insertRow(row)
-            is_z = fiscal_record.get("type") == "z"
-            if signed:
-                if is_z:
-                    status = "Z issued" if not fiscal_record.get("note") else "Z (day already closed)"
-                else:
-                    status = "Re-signed" if fiscal_record.get("resigned") else "Signed"
-                detail = fiscal_record.get("signature", "")
-                if is_z and fiscal_record.get("z_no"):
-                    detail = f"Z {fiscal_record['z_no']}   {detail}"
-                copies = fiscal_record.get("copies_printed", 0)
-                if copies:
-                    detail += f"   ({copies} cop{'y' if copies == 1 else 'ies'} printed)"
-            else:
-                status, detail = ("Z FAILED" if is_z else "UNSIGNED"), fiscal_record.get("error", "")
-            values = [record.get("received", "").replace("T", " "), "Z report" if is_z else "Receipt", job.stem, status, detail]
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setForeground(QColor("#2e7d32" if signed else "#c62828"))
-                if column == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, job)
-                self.fiscal_table.setItem(row, column, item)
-        self.fiscal_table.resizeColumnsToContents()
-        self.fiscal_count.setText(f"{len(rows)} shown, {unsigned_total} unsigned / failed")
-
-    def _fiscal_job_at(self, row: int) -> Job:
-        return self.fiscal_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-
-    def _selected_fiscal_jobs(self) -> list[Job]:
-        rows = sorted({index.row() for index in self.fiscal_table.selectionModel().selectedRows()})
-        return [self._fiscal_job_at(row) for row in rows]
-
-    def _reprint_selected_fiscal(self) -> None:
-        jobs = self._selected_fiscal_jobs()
+    def preview_selected(self) -> None:
+        jobs = self._selected_jobs()
         if not jobs:
-            QMessageBox.information(self, "Reprint", "Select one or more receipts first.")
+            QMessageBox.information(self, "Preview", "Select a document first.")
+            return
+        self.preview_job(jobs[0])
+
+    def _reprint_selected(self) -> None:
+        jobs = self._selected_jobs()
+        if not jobs:
+            QMessageBox.information(self, "Reprint", "Select one or more documents first.")
             return
         for index, job in enumerate(jobs):
             self.reprint_job(job, ask=index == 0)
-        self.refresh_fiscal_receipts()
+        self.refresh_jobs()
+
+    def _resign_selected(self) -> None:
+        jobs = self._selected_jobs()
+        if not jobs and self.filter_buttons["unsigned"].isChecked():
+            jobs = [self._job_at_row(row) for row in range(self.jobs_table.rowCount())]
+        self.resign_jobs(jobs)
 
     def _update_fiscal_record(self, job: Job, change) -> None:
         try:
@@ -1767,7 +1878,7 @@ class MainWindow(QMainWindow):
         z_count = sum(1 for *_, kind in pending if kind == "z")
         settings = self._fiscal_settings()
         if settings.mode != fiscal.REST:
-            QMessageBox.information(self, "Re-sign", "Re-signing uses the RESTful API. Choose it on the Fiscal tab first.")
+            QMessageBox.information(self, "Re-sign", "Re-signing uses the RESTful API (Settings > Fiscal device).")
             return
         print_after = self.resign_print.isChecked()
         if print_after and not self.active_forward_target().enabled:
@@ -1841,7 +1952,6 @@ class MainWindow(QMainWindow):
         self.update_z_deadline()
         self._resigning = False
         results = self._resign_results
-        self.refresh_fiscal_receipts()
         self.refresh_jobs()
         message = f"Signed {results['ok']} receipt(s)."
         if results["failed"]:
@@ -1864,7 +1974,7 @@ class MainWindow(QMainWindow):
         if not target.enabled:
             self._show_printer_status(None)
             if manual:
-                QMessageBox.information(self, "Printer status", "No real printer is set up on the Forwarding tab.")
+                QMessageBox.information(self, "Printer status", "No real printer is set up (Settings > Receipt printer).")
             return
         if self._printer_checking:
             return

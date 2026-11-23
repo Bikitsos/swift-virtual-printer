@@ -256,7 +256,7 @@ class PrintServer(QObject):
             self._run_fiscal(job, "", make_z, "z")
         else:
             if category == "zreport":
-                log.info("Z report %s received; automatic fiscal Z is off (Fiscal tab)", stem)
+                log.info("Z report %s received; automatic fiscal Z is off (Settings > Fiscal device)", stem)
             self._finish(job, "", None)
 
     def _run_fiscal(self, job: dict, doc: str, call, kind: str) -> None:
