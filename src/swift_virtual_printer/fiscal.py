@@ -47,6 +47,10 @@ FLAG3 = {
 }
 
 
+# Fewer remaining signatures in the current block than this is reported as a warning.
+LOW_BLOCK_SIGNATURES = 100
+
+
 @dataclass(frozen=True)
 class FiscalSettings:
     mode: str = OFF
@@ -113,6 +117,10 @@ def _rest_status(host: str, port: int, timeout: float = 8.0) -> FiscalStatus:
     }
     details = {label: str(info[key]) for key, label in labels.items() if key in info}
     if result == 0:
+        remaining = str(info.get("remaining_block_signatures", "")).strip()
+        if remaining.isdigit() and int(remaining) <= LOW_BLOCK_SIGNATURES:
+            warning = f"Only {int(remaining)} signatures left in the current block: issue a Z report soon"
+            return FiscalStatus("warning", warning, (warning,), details, source)
         return FiscalStatus("ok", "Ready", details=details, source=source)
     message = body.get("exresult") or REST_ERRORS.get(result, f"Error {result}")
     state = "disconnected" if result == 129 else "error"
@@ -240,6 +248,21 @@ def issue_z(host: str, port: int, timeout: float = 90.0) -> SignResult:
         return replace(result, note="Day already closed: last Z") if result.ok else result
     body, error = _post(host, port, "make_z", None, timeout)
     return SignResult(False, error=error, kind="z") if body is None else _result_from(body, "z")
+
+
+def get_last_z(host: str, port: int) -> SignResult:
+    body, error = _post(host, port, "get_z", None, 15.0)
+    return SignResult(False, error=error, kind="z") if body is None else _result_from(body, "z")
+
+
+def resend_files(host: str, port: int) -> tuple[bool, str]:
+    """Ask the driver to resend the sign files; returns (success, message)."""
+    body, error = _post(host, port, "resend_files", None, 60.0)
+    if body is None:
+        return False, error
+    if int(body.get("result", -1)) != 0:
+        return False, _reply_error(body)
+    return True, "The driver resent the sign files."
 
 
 def signature_lines(result: SignResult, width: int) -> list[str]:

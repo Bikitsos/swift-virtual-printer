@@ -144,6 +144,24 @@ With **Issue the fiscal Z (daily zeroset) when the POS prints a Z report** ticke
 
 If it fails, the Z report prints *THERE IS NO FISCAL SIGNATURE DUE TO FISCAL DEVICE FAILURE*. It appears as **Z FAILED** in the Fiscal receipts tab, and in the Jobs list as *(Z report, Z FAILED)*. Select it and click **Re-sign / retry Z** (or right-click → *Retry fiscal Z*) when the device is back. The same check prevents a second Z if the day was closed in the meantime. Z reports are listed with type *Z report* and status *Z issued*, *Z (day already closed)* or *Z FAILED*. Reprints of a fiscal Z report also get **COPY**. On the command line: `--fiscal-z`.
 
+#### Z deadline reminder and capacity warnings
+
+- **24-hour Z reminder.** The Cy-Net refuses to sign more than 24 hours after the first signature since the last Z (error 20, *Z closure time limit*). The Fiscal tab shows *Z report due by dd/mm hh:mm*, calculated from the first signed receipt since the last fiscal Z. The reminder is updated every minute and after every receipt.
+  - **One hour before:** it turns orange, the status bar shows *Z due hh:mm*, and a tray warning appears.
+  - **When the deadline passes:** it turns red and shows *Z OVERDUE*, with another tray warning.
+  - It is only active when receipt signing is on.
+- **Capacity warnings.** The fiscal status turns orange (warning) for *Only N signatures left in the current block* (RESTful API, 100 or fewer) and *30 or fewer daily zerosets left in fiscal memory* (file-based driver). *Fiscal memory full* and *Fiscal unit is full* are shown as errors.
+
+#### Fiscal tools in the Service menu
+
+The password-protected **Service** dialog has a **Fiscal device** section (RESTful API only):
+
+| Tool | What it does |
+| --- | --- |
+| **Issue Z now...** | Closes the fiscal day (`make_z`) when the POS can't. It asks for confirmation (it can't be undone) and warns about unsigned receipts from today. It uses the same double-Z guard as the automatic Z. A Z slip with the fiscal Z data is saved in `zreports/` and printed on the real printer. |
+| **Show last Z** | Shows the data of the last Z (`get_z`): Z number, signature, counters, date/time. |
+| **Resend sign files** | Asks the driver to resend its sign files (`resend_files`). |
+
 ### Service menu
 
 **Service → Service tools...** (also **Service...** in the tray menu) opens the administrative tools after you enter the service password. Ask your administrator for it. After 3 wrong attempts the menu is locked for 60 seconds.

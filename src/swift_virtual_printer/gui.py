@@ -11,6 +11,7 @@ import signal
 import sys
 import threading
 import time
+from datetime import datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,7 +59,7 @@ from .forward import NETWORK, OFF, WINDOWS, ForwardTarget, forward_async, list_w
 from .logo import LogoSettings, load_logo
 from .render import PdfRenderer, bitmap_to_qimage
 from .main import PAPER_SIZES
-from .server import PrintServer, misc_dir_for, zreports_dir_for
+from .server import AUTO_CUT, SUBFOLDERS, PrintServer, misc_dir_for, zreports_dir_for
 from .printer_status import PrinterStatus, check_status
 from . import fiscal
 from .fiscal import COPY_HEADER, FiscalSettings, FiscalStatus, replace_signature
@@ -299,12 +300,30 @@ class ServiceDialog(QDialog):
         maintenance_box = QGroupBox("Maintenance")
         maintenance_box.setLayout(maintenance)
 
+        issue_z = QPushButton("Issue Z now...")
+        issue_z.setToolTip("Close the fiscal day on the Cy-Net (make_z) and print the Z data.")
+        issue_z.clicked.connect(lambda: (window.issue_z_now(), self.refresh()))
+        last_z = QPushButton("Show last Z")
+        last_z.clicked.connect(window.show_last_z)
+        resend = QPushButton("Resend sign files")
+        resend.setToolTip("Ask the Cy-Net driver to resend its sign files (resend_files).")
+        resend.clicked.connect(window.resend_sign_files)
+        fiscal_tools = QHBoxLayout()
+        for button in (issue_z, last_z, resend):
+            fiscal_tools.addWidget(button)
+        fiscal_box = QGroupBox("Fiscal device (Cy-Net 100, RESTful API)")
+        fiscal_box.setLayout(fiscal_tools)
+        fiscal_box.setEnabled(window._fiscal_settings().mode == fiscal.REST)
+        if not fiscal_box.isEnabled():
+            fiscal_box.setToolTip("Choose the RESTful API connection on the Fiscal tab to use these tools.")
+
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
         layout.addWidget(service_box)
         layout.addWidget(storage_box)
+        layout.addWidget(fiscal_box)
         layout.addWidget(maintenance_box)
         layout.addWidget(close)
         self.refresh()
@@ -347,6 +366,7 @@ class MainWindow(QMainWindow):
     _fiscal_status_signal = Signal(object, bool)
     _resign_signal = Signal(object, str, object)
     _resign_done_signal = Signal()
+    _tool_signal = Signal(object, object)  # callback, result of a background fiscal call
 
     def __init__(self, log_emitter: LogEmitter) -> None:
         super().__init__()
@@ -380,6 +400,12 @@ class MainWindow(QMainWindow):
         self._resign_results: dict = {}
         self._resign_signal.connect(self._on_resigned)
         self._resign_done_signal.connect(self._on_resign_done)
+        self._tool_signal.connect(lambda callback, result: callback(result))
+        self._z_warned: tuple | None = None
+        self._z_timer = QTimer(self)
+        self._z_timer.setInterval(60 * 1000)
+        self._z_timer.timeout.connect(self.update_z_deadline)
+        self._z_timer.start()
 
         self._build_ui()
         self._build_menu()
@@ -392,6 +418,7 @@ class MainWindow(QMainWindow):
         if self.auto_update_action.isChecked():
             QTimer.singleShot(5000, lambda: self.check_for_updates(silent=True))
         QTimer.singleShot(2000, self.check_fiscal)
+        QTimer.singleShot(2500, self.update_z_deadline)
 
     # -- UI construction ----------------------------------------------------
 
@@ -489,6 +516,8 @@ class MainWindow(QMainWindow):
         self.fiscal_label = QLabel()
         self.statusBar().addPermanentWidget(self.fiscal_dot)
         self.statusBar().addPermanentWidget(self.fiscal_label)
+        self.z_due_status = QLabel()
+        self.statusBar().addPermanentWidget(self.z_due_status)
 
     def _build_printer_tab(self) -> QWidget:
         self.host_edit = QLineEdit()
@@ -758,6 +787,9 @@ class MainWindow(QMainWindow):
         status_layout = QVBoxLayout(status_box)
         status_layout.addWidget(self.fiscal_state_label)
         status_layout.addWidget(self.fiscal_details)
+        self.z_due_label = QLabel()
+        self.z_due_label.setWordWrap(True)
+        status_layout.addWidget(self.z_due_label)
 
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -986,6 +1018,196 @@ class MainWindow(QMainWindow):
             lines.append(f"{name.capitalize()}: {root} ({count} files, {format_size(size)})")
         QApplication.clipboard().setText("\n".join(lines))
         QMessageBox.information(self, "Diagnostics", "Diagnostics copied to the clipboard.\n\n" + "\n".join(lines))
+
+    # -- fiscal Z deadline and service tools ----------------------------------
+
+    @staticmethod
+    def _fiscal_time(record: dict, fallback: str) -> datetime | None:
+        """Device date/time of a signature (ddmmyy + hhmmss), or the job's received time."""
+        date, time_ = str(record.get("date", "")), str(record.get("time", ""))
+        try:
+            if len(date) == 6 and len(time_) >= 4:
+                return datetime.strptime(date + time_[:4], "%d%m%y%H%M")
+            return datetime.fromisoformat(fallback)
+        except ValueError:
+            return None
+
+    def _signed_times(self, root: Path, days: int = 3) -> list[datetime]:
+        times = []
+        for day in range(days):
+            prefix = f"job_{datetime.now() - timedelta(days=day):%Y%m%d}_"
+            for path in (root / "json").glob(f"{prefix}*.json"):
+                try:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                fiscal_record = record.get("fiscal")
+                if fiscal_record and fiscal_record.get("signed"):
+                    moment = self._fiscal_time(fiscal_record, record.get("received", ""))
+                    if moment:
+                        times.append(moment)
+        return times
+
+    def _z_deadline(self) -> datetime | None:
+        """24 h after the first signed receipt since the last fiscal Z (the device's Z closure time limit)."""
+        last_z = max(self._signed_times(self.zreports_dir), default=None)
+        since = [t for t in self._signed_times(self.output_dir) if last_z is None or t > last_z]
+        return min(since) + timedelta(hours=24) if since else None
+
+    def update_z_deadline(self) -> None:
+        if self._fiscal_sign_settings() is None:
+            self.z_due_label.setText("")
+            self.z_due_status.setText("")
+            return
+        deadline = self._z_deadline()
+        if deadline is None:
+            self.z_due_label.setText("Z report: no signed receipts since the last Z.")
+            self.z_due_label.setStyleSheet("color: #777;")
+            self.z_due_status.setText("")
+            return
+        remaining = deadline - datetime.now()
+        if remaining.total_seconds() <= 0:
+            level, color = "overdue", "#c62828"
+            text = f"Z report OVERDUE since {deadline:%d/%m %H:%M}: the device refuses to sign until a Z is issued."
+        elif remaining <= timedelta(hours=1):
+            level, color = "soon", "#ef6c00"
+            text = f"Z report due by {deadline:%d/%m %H:%M} (in {int(remaining.total_seconds() // 60)} min)."
+        else:
+            level, color = "ok", "#2e7d32"
+            text = f"Z report due by {deadline:%d/%m %H:%M}."
+        self.z_due_label.setText(text)
+        self.z_due_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        self.z_due_status.setText(f"Z due {deadline:%H:%M}" if level == "soon" else "Z OVERDUE" if level == "overdue" else "")
+        self.z_due_status.setStyleSheet(f"color: {color}; font-weight: bold;")
+        if level != "ok" and self._z_warned != (deadline, level):
+            self._z_warned = (deadline, level)
+            logging.warning("%s", text)
+            self.tray.showMessage("Fiscal Z report", text, QSystemTrayIcon.MessageIcon.Warning, 15000)
+
+    def run_fiscal_tool(self, call, on_done) -> None:
+        """Run a fiscal driver call in the background and hand its result to on_done on the main thread."""
+
+        def run() -> None:
+            try:
+                result = call()
+            except Exception as exc:  # report instead of crashing the app
+                result = exc
+            self._tool_signal.emit(on_done, result)
+
+        threading.Thread(target=run, name="fiscal-tool", daemon=True).start()
+
+    def _fiscal_rest(self, title: str) -> FiscalSettings | None:
+        settings = self._fiscal_settings()
+        if settings.mode != fiscal.REST:
+            QMessageBox.information(self, title, "Choose the RESTful API connection on the Fiscal tab first.")
+            return None
+        return settings
+
+    def _unsigned_today(self) -> int:
+        count = 0
+        for path in (self.output_dir / "json").glob(f"job_{datetime.now():%Y%m%d}_*.json"):
+            try:
+                fiscal_record = json.loads(path.read_text(encoding="utf-8")).get("fiscal")
+            except (OSError, ValueError):
+                continue
+            if fiscal_record and not fiscal_record.get("signed"):
+                count += 1
+        return count
+
+    def issue_z_now(self) -> None:
+        settings = self._fiscal_rest("Issue Z now")
+        if settings is None:
+            return
+        message = "Issue the fiscal Z (daily zeroset) now?\n\nThis closes the fiscal day and cannot be undone."
+        unsigned = self._unsigned_today()
+        if unsigned:
+            message += f"\n\n{unsigned} receipt(s) from today are still UNSIGNED and will not be in this Z."
+        if QMessageBox.question(self, "Issue Z now", message) != QMessageBox.StandardButton.Yes:
+            return
+        self.statusBar().showMessage("Issuing the fiscal Z...")
+        logging.info("Service: issuing the fiscal Z")
+        self.run_fiscal_tool(lambda: fiscal.issue_z(settings.host, settings.port), self._on_manual_z)
+
+    def _on_manual_z(self, result) -> None:
+        if isinstance(result, Exception) or not result.ok:
+            error = result if isinstance(result, Exception) else result.error
+            logging.warning("Service: fiscal Z failed: %s", error)
+            self.statusBar().showMessage(f"Fiscal Z failed: {error}", 10000)
+            QMessageBox.warning(self, "Issue Z now", f"The fiscal Z could not be issued.\n\n{error}")
+            return
+        job = self._save_manual_z(result)
+        logging.info("Service: fiscal Z %s issued (%s)%s", result.z_no, result.signature,
+                     f" - {result.note}" if result.note else "")
+        self.statusBar().showMessage(f"Fiscal Z {result.z_no} issued", 10000)
+        self.update_z_deadline()
+        width = fiscal.chars_per_line(PAPER_SIZES[self.paper_combo.currentData()][1])
+        printed = " and sent to the printer" if self.active_forward_target().enabled else ""
+        QMessageBox.information(
+            self, "Issue Z now",
+            "\n".join(fiscal.signature_lines(result, width)) + f"\n\nSaved as {job.stem} in the zreports folder{printed}.",
+        )
+
+    def _save_manual_z(self, result: fiscal.SignResult) -> Job:
+        """Save (and print) a Z slip for a Z issued from the Service menu, like a POS Z report."""
+        paper_mm, paper_dots = PAPER_SIZES[self.paper_combo.currentData()]
+        now = datetime.now()
+        job = Job(self.zreports_dir, f"job_{now:%Y%m%d_%H%M%S}_9999")
+        header = b"\x1b@\x1ba\x01\x1bE\x01\x1d!\x11Z REPORT\n\x1d!\x00\x1bE\x00Issued from the Service menu\n\x1ba\x00"
+        data = header + fiscal.signature_escpos(result, fiscal.chars_per_line(paper_dots)) + b"\n\n\n" + AUTO_CUT
+        for name in SUBFOLDERS:
+            (job.root / name).mkdir(parents=True, exist_ok=True)
+        job.bin.write_bytes(data)
+        job.final_bin.write_bytes(data)
+        elements = EscPosParser(paper_dots).parse(data)
+        renderer = PdfRenderer(paper_mm, paper_dots)
+        renderer.render(elements, job.pdf)
+        renderer.render(elements, job.final_pdf)
+        lines = elements_to_lines(elements)
+        record = {
+            "job": job.stem, "category": "zreport", "received": now.isoformat(timespec="seconds"),
+            "client": "Service menu", "size_bytes": len(data), "paper_mm": paper_mm, "app": f"{APP_NAME} {__version__}",
+            "files": {"bin": f"bin/{job.stem}.bin", "pdf": f"pdf/{job.stem}.pdf",
+                      "final_bin": f"final/{job.stem}.bin", "final_pdf": f"final/{job.stem}.pdf"},
+            "logo": None, "fiscal": result.as_record(""),
+            "line_count": len(lines), "lines": {f"line_{i:03d}": text for i, text in enumerate(lines, 1)},
+        }
+        job.json.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        target = self.active_forward_target()
+        if target.enabled:
+            forward_async(target, data, job.stem)
+        self.refresh_jobs()
+        self.refresh_fiscal_receipts()
+        return job
+
+    def show_last_z(self) -> None:
+        settings = self._fiscal_rest("Last Z")
+        if settings is None:
+            return
+
+        def done(result) -> None:
+            if isinstance(result, Exception) or not result.ok:
+                error = result if isinstance(result, Exception) else result.error
+                QMessageBox.warning(self, "Last Z", f"Could not read the last Z.\n\n{error}")
+                return
+            width = fiscal.chars_per_line(PAPER_SIZES[self.paper_combo.currentData()][1])
+            QMessageBox.information(self, "Last Z", "\n".join(fiscal.signature_lines(result, width)))
+
+        self.run_fiscal_tool(lambda: fiscal.get_last_z(settings.host, settings.port), done)
+
+    def resend_sign_files(self) -> None:
+        settings = self._fiscal_rest("Resend sign files")
+        if settings is None:
+            return
+        self.statusBar().showMessage("Asking the fiscal driver to resend the sign files...")
+
+        def done(result) -> None:
+            ok, message = (False, str(result)) if isinstance(result, Exception) else result
+            logging.info("Service: resend sign files: %s", message) if ok else logging.warning(
+                "Service: resend sign files failed: %s", message)
+            self.statusBar().showMessage(message, 10000)
+            (QMessageBox.information if ok else QMessageBox.warning)(self, "Resend sign files", message)
+
+        self.run_fiscal_tool(lambda: fiscal.resend_files(settings.host, settings.port), done)
 
     # -- updates ------------------------------------------------------------
 
@@ -1323,6 +1545,8 @@ class MainWindow(QMainWindow):
         self.last_job = job
         self._tray_click = self.preview_last_job
         self._add_job_item(job, top=True)
+        if job.root in (self.output_dir, self.zreports_dir):
+            self.update_z_deadline()
         if job.root == self.output_dir and self.job_tabs.currentIndex() == 1:
             self.refresh_fiscal_receipts()
         kind = {self.misc_dir: "Document (misc)", self.zreports_dir: "Z report"}.get(job.root, "Receipt")
@@ -1614,6 +1838,7 @@ class MainWindow(QMainWindow):
         job.json.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _on_resign_done(self) -> None:
+        self.update_z_deadline()
         self._resigning = False
         results = self._resign_results
         self.refresh_fiscal_receipts()
