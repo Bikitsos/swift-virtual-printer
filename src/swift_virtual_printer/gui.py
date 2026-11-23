@@ -731,6 +731,11 @@ class MainWindow(QMainWindow):
         self.fiscal_mode.currentIndexChanged.connect(self._update_fiscal_fields)
 
         self.fiscal_monitor = QCheckBox(f"Check every {FISCAL_CHECK_SECONDS} s and notify on problems")
+        self.fiscal_z = QCheckBox("Issue the fiscal Z (daily zeroset) when the POS prints a Z report (RESTful API)")
+        self.fiscal_z.setToolTip(
+            "When a job matches the Z report rule, make_z is called and the fiscal Z data is printed on the Z report. "
+            "If no receipts were signed since the last Z, the day is not closed again: the last Z data is printed instead."
+        )
         self.fiscal_sign = QCheckBox("Sign receipts with the fiscal device before printing (RESTful API)")
         self.fiscal_sign.setToolTip(
             "Each receipt is sent to sign_doc first; the signature block is printed at the bottom. "
@@ -763,18 +768,24 @@ class MainWindow(QMainWindow):
         layout.addLayout(self.fiscal_form)
         layout.addLayout(check_row)
         layout.addWidget(self.fiscal_sign)
+        layout.addWidget(self.fiscal_z)
         layout.addWidget(status_box)
         layout.addStretch(1)
         return page
 
     def _update_fiscal_fields(self) -> None:
         self.fiscal_sign.setEnabled(self.fiscal_mode.currentData() == fiscal.REST)
+        self.fiscal_z.setEnabled(self.fiscal_mode.currentData() == fiscal.REST)
         mode = self.fiscal_mode.currentData()
         # Rows: 0 connection, 1 address, 2 port, 3 command folder, 4 answer folder.
         for row, visible in ((1, mode == fiscal.REST), (2, mode == fiscal.REST), (3, mode == fiscal.FILES), (4, mode == fiscal.FILES)):
             self.fiscal_form.setRowVisible(row, visible)
         self._fiscal_status = None
         self._update_fiscal_timer()
+
+    def _fiscal_z_settings(self) -> FiscalSettings | None:
+        settings = self._fiscal_settings()
+        return settings if self.fiscal_z.isChecked() and settings.mode == fiscal.REST else None
 
     def _fiscal_sign_settings(self) -> FiscalSettings | None:
         settings = self._fiscal_settings()
@@ -1130,6 +1141,7 @@ class MainWindow(QMainWindow):
         self.fiscal_answer_dir.setText(str(s.value("fiscal_answer_dir", fiscal.DEFAULT_ANSWER_DIR)))
         self.fiscal_monitor.setChecked(s.value("fiscal_monitor", True, type=bool))
         self.fiscal_sign.setChecked(s.value("fiscal_sign", False, type=bool))
+        self.fiscal_z.setChecked(s.value("fiscal_z", False, type=bool))
         self._update_fiscal_fields()
         self.marker_edit.setText(str(s.value("marker_pattern", DEFAULT_MARKER)))
         self.marker_line.setValue(int(s.value("marker_line", 1)))
@@ -1167,6 +1179,7 @@ class MainWindow(QMainWindow):
         s.setValue("fiscal_answer_dir", self.fiscal_answer_dir.text().strip())
         s.setValue("fiscal_monitor", self.fiscal_monitor.isChecked())
         s.setValue("fiscal_sign", self.fiscal_sign.isChecked())
+        s.setValue("fiscal_z", self.fiscal_z.isChecked())
         s.setValue("marker_pattern", self.marker_edit.text())
         s.setValue("marker_line", self.marker_line.value())
         s.setValue("marker_contains", bool(self.marker_mode.currentData()))
@@ -1210,6 +1223,7 @@ class MainWindow(QMainWindow):
             self._receipt_rule(),
             self._zreport_rule(),
             self._fiscal_sign_settings(),
+            self._fiscal_z_settings(),
             parent=self,
         )
         try:
@@ -1223,8 +1237,11 @@ class MainWindow(QMainWindow):
         server.job_saved.connect(self._on_job_saved)
         server.fiscal_failed.connect(
             lambda stem, error: self.tray.showMessage(
-                "Receipt NOT fiscally signed", f"{stem}\n{error}", QSystemTrayIcon.MessageIcon.Warning, 10000
+                "Fiscal device problem", f"{stem}\n{error}", QSystemTrayIcon.MessageIcon.Warning, 10000
             )
+        )
+        server.fiscal_warning.connect(
+            lambda message: self.tray.showMessage("Fiscal Z", message, QSystemTrayIcon.MessageIcon.Warning, 10000)
         )
         self.server = server
         self._set_running(True)
@@ -1267,10 +1284,10 @@ class MainWindow(QMainWindow):
 
     def _add_job_item(self, job: Job, top: bool = False) -> None:
         tag = {self.misc_dir: "    (misc)", self.zreports_dir: "    (Z report)"}.get(job.root, "")
-        fiscal_record = _fiscal_record(job) if job.root == self.output_dir else None
+        fiscal_record = _fiscal_record(job) if job.root in (self.output_dir, self.zreports_dir) else None
         unsigned = bool(fiscal_record) and not fiscal_record.get("signed")
         if unsigned:
-            tag = "    (UNSIGNED)"
+            tag = "    (Z report, Z FAILED)" if job.root == self.zreports_dir else "    (UNSIGNED)"
         item = QListWidgetItem(job.stem + tag)
         item.setData(Qt.ItemDataRole.UserRole, job)
         item.setToolTip(str(job.best_pdf) + (f"\nNot signed: {fiscal_record.get('error', '')}" if unsigned else ""))
@@ -1322,9 +1339,10 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Preview", lambda: self.preview_job(job))
         menu.addAction("Reprint", lambda: self.reprint_job(job)).setEnabled(job.print_bytes_path is not None)
-        fiscal_record = _fiscal_record(job) if job.root == self.output_dir else None
+        fiscal_record = _fiscal_record(job) if job.root in (self.output_dir, self.zreports_dir) else None
         if fiscal_record and not fiscal_record.get("signed"):
-            menu.addAction("Re-sign with fiscal device", lambda: self.resign_jobs([job]))
+            label = "Retry fiscal Z" if fiscal_record.get("type") == "z" else "Re-sign with fiscal device"
+            menu.addAction(label, lambda: self.resign_jobs([job]))
         menu.addSeparator()
         menu.addAction("Open final PDF", lambda: self._open_path(job.final_pdf)).setEnabled(job.final_pdf.exists())
         menu.addAction("Open PDF as received", lambda: self._open_path(job.pdf)).setEnabled(job.pdf.exists())
@@ -1363,7 +1381,7 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         data = path.read_bytes()
-        record = _fiscal_record(job) if job.root == self.output_dir else None
+        record = _fiscal_record(job) if job.root in (self.output_dir, self.zreports_dir) else None
         if copy is None:
             copy = bool(record and record.get("signed"))
         if copy:
@@ -1396,8 +1414,8 @@ class MainWindow(QMainWindow):
         top.addWidget(self.fiscal_count, 1)
         top.addWidget(refresh)
 
-        self.fiscal_table = QTableWidget(0, 4)
-        self.fiscal_table.setHorizontalHeaderLabels(["Received", "Receipt", "Status", "Signature / error"])
+        self.fiscal_table = QTableWidget(0, 5)
+        self.fiscal_table.setHorizontalHeaderLabels(["Received", "Type", "Document", "Status", "Signature / error"])
         self.fiscal_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.fiscal_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.fiscal_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -1405,8 +1423,8 @@ class MainWindow(QMainWindow):
         self.fiscal_table.horizontalHeader().setStretchLastSection(True)
         self.fiscal_table.doubleClicked.connect(lambda index: self.preview_job(self._fiscal_job_at(index.row())))
 
-        resign = QPushButton("Re-sign selected")
-        resign.setToolTip("Sign unsigned receipts now (the fiscal device must be online).")
+        resign = QPushButton("Re-sign / retry Z")
+        resign.setToolTip("Sign unsigned receipts or retry a failed fiscal Z now (the fiscal device must be online).")
         resign.clicked.connect(lambda: self.resign_jobs(self._selected_fiscal_jobs()))
         self.resign_print = QCheckBox("Print after re-signing")
         self.resign_print.setChecked(True)
@@ -1436,8 +1454,12 @@ class MainWindow(QMainWindow):
     def refresh_fiscal_receipts(self) -> None:
         wanted = self.fiscal_filter.currentData()
         rows = []
-        json_dir = self.output_dir / "json"
-        for path in sorted(json_dir.glob("*.json"), reverse=True)[:2000] if json_dir.is_dir() else []:
+        paths = []
+        for root in (self.output_dir, self.zreports_dir):
+            json_dir = root / "json"
+            if json_dir.is_dir():
+                paths += [(path.stem, root, path) for path in json_dir.glob("*.json")]
+        for stem, root, path in sorted(paths, reverse=True)[:2000]:
             try:
                 record = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -1447,22 +1469,28 @@ class MainWindow(QMainWindow):
                 continue
             signed = bool(fiscal_record.get("signed"))
             if wanted == "all" or (wanted == "signed") == signed:
-                rows.append((Job(self.output_dir, path.stem), record, fiscal_record, signed))
+                rows.append((Job(root, stem), record, fiscal_record, signed))
 
         self.fiscal_table.setRowCount(0)
         unsigned_total = sum(1 for *_, signed in rows if not signed)
         for job, record, fiscal_record, signed in rows:
             row = self.fiscal_table.rowCount()
             self.fiscal_table.insertRow(row)
+            is_z = fiscal_record.get("type") == "z"
             if signed:
-                status = "Re-signed" if fiscal_record.get("resigned") else "Signed"
+                if is_z:
+                    status = "Z issued" if not fiscal_record.get("note") else "Z (day already closed)"
+                else:
+                    status = "Re-signed" if fiscal_record.get("resigned") else "Signed"
                 detail = fiscal_record.get("signature", "")
+                if is_z and fiscal_record.get("z_no"):
+                    detail = f"Z {fiscal_record['z_no']}   {detail}"
                 copies = fiscal_record.get("copies_printed", 0)
                 if copies:
                     detail += f"   ({copies} cop{'y' if copies == 1 else 'ies'} printed)"
             else:
-                status, detail = "UNSIGNED", fiscal_record.get("error", "")
-            values = [record.get("received", "").replace("T", " "), job.stem, status, detail]
+                status, detail = ("Z FAILED" if is_z else "UNSIGNED"), fiscal_record.get("error", "")
+            values = [record.get("received", "").replace("T", " "), "Z report" if is_z else "Receipt", job.stem, status, detail]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setForeground(QColor("#2e7d32" if signed else "#c62828"))
@@ -1470,7 +1498,7 @@ class MainWindow(QMainWindow):
                     item.setData(Qt.ItemDataRole.UserRole, job)
                 self.fiscal_table.setItem(row, column, item)
         self.fiscal_table.resizeColumnsToContents()
-        self.fiscal_count.setText(f"{len(rows)} shown, {unsigned_total} unsigned")
+        self.fiscal_count.setText(f"{len(rows)} shown, {unsigned_total} unsigned / failed")
 
     def _fiscal_job_at(self, row: int) -> Job:
         return self.fiscal_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
@@ -1501,37 +1529,52 @@ class MainWindow(QMainWindow):
         pending = []
         for job in jobs:
             record = _fiscal_record(job)
-            if record and not record.get("signed") and record.get("doc"):
-                pending.append((job, record["doc"]))
+            if not record or record.get("signed"):
+                continue
+            if record.get("type") == "z":
+                pending.append((job, "", "z"))
+            elif record.get("doc"):
+                pending.append((job, record["doc"], "sign"))
         if not pending:
-            QMessageBox.information(self, "Re-sign", "Select one or more UNSIGNED receipts first.")
+            QMessageBox.information(self, "Re-sign", "Select one or more UNSIGNED receipts or a failed Z first.")
             return
+        # Receipts first, so they are included in the Z if both are retried together.
+        pending.sort(key=lambda item: item[2] == "z")
+        z_count = sum(1 for *_, kind in pending if kind == "z")
         settings = self._fiscal_settings()
         if settings.mode != fiscal.REST:
             QMessageBox.information(self, "Re-sign", "Re-signing uses the RESTful API. Choose it on the Fiscal tab first.")
             return
         print_after = self.resign_print.isChecked()
         if print_after and not self.active_forward_target().enabled:
-            QMessageBox.information(self, "Re-sign", "No real printer is set up, so the receipts will only be signed, not printed.")
+            QMessageBox.information(self, "Re-sign", "No real printer is set up, so the documents will only be signed, not printed.")
             print_after = False
         if self._resigning:
             return
+        parts = []
+        if len(pending) - z_count:
+            parts.append(f"sign {len(pending) - z_count} receipt(s)")
+        if z_count:
+            parts.append("issue the fiscal Z (daily zeroset), which cannot be undone")
         answer = QMessageBox.question(
             self, "Re-sign",
-            f"Sign {len(pending)} receipt(s) with the fiscal device now" + (" and print them" if print_after else "") + "?",
+            f"Now {' and '.join(parts)} with the fiscal device" + (" and print the result" if print_after else "") + "?",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._resigning = True
         self._resign_results = {"ok": 0, "failed": 0, "error": "", "print": print_after}
-        self.statusBar().showMessage(f"Re-signing {len(pending)} receipt(s)...")
+        self.statusBar().showMessage(f"Sending {len(pending)} document(s) to the fiscal device...")
 
         def run() -> None:
-            for job, doc in pending:
+            for job, doc, kind in pending:
                 try:
-                    result = fiscal.sign_document(settings.host, settings.port, doc)
-                except Exception as exc:  # keep going with the other receipts
-                    result = fiscal.SignResult(False, error=str(exc))
+                    if kind == "z":
+                        result = fiscal.issue_z(settings.host, settings.port)
+                    else:
+                        result = fiscal.sign_document(settings.host, settings.port, doc)
+                except Exception as exc:  # keep going with the other documents
+                    result = fiscal.SignResult(False, error=str(exc), kind=kind)
                 self._resign_signal.emit(job, doc, result)
             self._resign_done_signal.emit()
 

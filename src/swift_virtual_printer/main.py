@@ -39,6 +39,7 @@ def main() -> int:
     parser.add_argument("--zreport-line", type=int, default=0, metavar="N", help="text line to check for the Z report marker, 0 = any line (default: 0)")
     parser.add_argument("--zreport-exact", action="store_true", help="the line must equal the Z report marker instead of containing it")
     parser.add_argument("--fiscal-sign", action="store_true", help="sign receipts with the Cy-Net 100 fiscal device (RESTful API) before printing")
+    parser.add_argument("--fiscal-z", action="store_true", help="issue the fiscal Z (daily zeroset) when the POS prints a Z report")
     parser.add_argument("--fiscal-host", default="127.0.0.1", help="fiscal driver address (default: 127.0.0.1)")
     parser.add_argument("--fiscal-port", type=int, default=9999, help="fiscal driver port (default: 9999)")
     args = parser.parse_args()
@@ -75,6 +76,7 @@ def main() -> int:
         args.host, args.port, args.output or default_receipts_dir(), paper_mm, paper_dots, args.idle_timeout,
         target, logo, args.auto_cut, not args.no_cleanup, rule, zreport_rule,
         FiscalSettings(REST, args.fiscal_host, args.fiscal_port) if args.fiscal_sign else None,
+        FiscalSettings(REST, args.fiscal_host, args.fiscal_port) if args.fiscal_z else None,
     )
     try:
         server.start()

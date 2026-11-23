@@ -7,7 +7,7 @@ import os
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .escpos import FONT_CELLS, EscPosParser
@@ -137,6 +137,8 @@ class SignResult:
     date: str = ""  # ddmmyy
     time: str = ""  # hhmmss
     error: str = ""
+    kind: str = "sign"  # "sign" (receipt signature) or "z" (daily zeroset)
+    note: str = ""
 
     @property
     def printed_datetime(self) -> str:
@@ -146,13 +148,17 @@ class SignResult:
         return f"{d} {t}".strip()
 
     def as_record(self, doc: str) -> dict:
-        record = {"signed": self.ok, "doc": doc}
+        record = {"type": self.kind, "signed": self.ok}
+        if self.kind == "sign":
+            record["doc"] = doc
         if self.ok:
             record.update(
                 signature=self.signature, device_serial=self.device_serial, z_no=self.z_no,
                 daily_signatures=self.daily_signatures, total_signatures=self.total_signatures,
                 date=self.date, time=self.time,
             )
+            if self.note:
+                record["note"] = self.note
         else:
             record["error"] = self.error
         return record
@@ -175,36 +181,65 @@ def build_doc(lines: list[str]) -> str:
     return text.encode(DOC_ENCODING, errors="replace").decode(DOC_ENCODING)
 
 
-def sign_document(host: str, port: int, doc: str, timeout: float = 10.0) -> SignResult:
-    request = urllib.request.Request(
-        f"http://{host}:{port}/sign_doc",
-        data=json.dumps({"doc": doc}, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        method="POST",
-    )
+def _post(host: str, port: int, endpoint: str, payload: dict | None, timeout: float) -> tuple[dict | None, str]:
+    """POST to the driver; returns (response JSON, "") or (None, error text)."""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else b""
+    headers = {"Content-Type": "application/json; charset=utf-8"} if payload is not None else {}
+    request = urllib.request.Request(f"http://{host}:{port}/{endpoint}", data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = json.loads(response.read().decode("utf-8", errors="replace"))
+            return json.loads(response.read().decode("utf-8", errors="replace")), ""
     except urllib.error.HTTPError as exc:
-        return SignResult(False, error=f"Driver returned HTTP {exc.code}")
+        return None, f"Driver returned HTTP {exc.code}"
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return SignResult(False, error=f"Fiscal driver not reachable ({getattr(exc, 'reason', exc)})")
+        return None, f"Fiscal driver not reachable ({getattr(exc, 'reason', exc)})"
     except ValueError:
-        return SignResult(False, error="Driver sent an invalid response")
+        return None, "Driver sent an invalid response"
 
+
+def _reply_error(body: dict) -> str:
     result = int(body.get("result", -1))
+    message = body.get("exresult") or REST_ERRORS.get(result, f"Error {result}")
+    return f"{message} (code {result})"
+
+
+def _result_from(body: dict, kind: str) -> SignResult:
+    if int(body.get("result", -1)) != 0:
+        return SignResult(False, error=_reply_error(body), kind=kind)
     info = body.get("details") or {}
-    if result != 0:
-        message = body.get("exresult") or REST_ERRORS.get(result, f"Error {result}")
-        return SignResult(False, error=f"{message} (code {result})")
     signature = str(info.get("signature") or body.get("exresult") or "")
     if not signature:
-        return SignResult(False, error="Driver returned no signature")
+        return SignResult(False, error="Driver returned no signature", kind=kind)
     return SignResult(
-        True, signature, str(info.get("device_serial_no", "")), str(info.get("signature_z_no", "")),
+        True, signature, str(info.get("device_serial_no", "")),
+        str(info.get("signature_z_no") or info.get("z_no") or ""),
         str(info.get("daily_signatures", "")), str(info.get("total_signatures", "")),
-        str(info.get("date", "")), str(info.get("time", "")),
+        str(info.get("date", "")), str(info.get("time", "")), kind=kind,
     )
+
+
+def sign_document(host: str, port: int, doc: str, timeout: float = 10.0) -> SignResult:
+    body, error = _post(host, port, "sign_doc", {"doc": doc}, timeout)
+    return SignResult(False, error=error) if body is None else _result_from(body, "sign")
+
+
+def issue_z(host: str, port: int, timeout: float = 90.0) -> SignResult:
+    """Issue the daily zeroset (make_z). If the fiscal day is already closed, return the last Z instead."""
+    body, error = _post(host, port, "check_system", None, 10.0)
+    if body is None:
+        return SignResult(False, error=error, kind="z")
+    if int(body.get("result", -1)) != 0:
+        return SignResult(False, error=_reply_error(body), kind="z")
+    daily = str((body.get("details") or {}).get("daily_signatures", "")).strip()
+    if daily.isdigit() and int(daily) == 0:
+        # No signatures since the last Z: never close the day twice, just print the last Z data.
+        body, error = _post(host, port, "get_z", None, 15.0)
+        if body is None:
+            return SignResult(False, error=error, kind="z")
+        result = _result_from(body, "z")
+        return replace(result, note="Day already closed: last Z") if result.ok else result
+    body, error = _post(host, port, "make_z", None, timeout)
+    return SignResult(False, error=error, kind="z") if body is None else _result_from(body, "z")
 
 
 def signature_lines(result: SignResult, width: int) -> list[str]:
@@ -213,14 +248,18 @@ def signature_lines(result: SignResult, width: int) -> list[str]:
     if not result.ok:
         return [rule, *NO_SIGNATURE_TEXT, rule]
     sig = result.signature
-    lines = [rule, "FISCAL SIGNATURE", sig[:20], sig[20:40]]
+    title = "FISCAL Z REPORT" if result.kind == "z" else "FISCAL SIGNATURE"
+    count_label = "Signatures" if result.kind == "z" else "Sign"
+    lines = [rule, title, sig[:20], sig[20:40]]
     # Each entry is printed on one line if it fits the paper, otherwise one part per line.
     for parts in (
         (f"Device: {result.device_serial}", f"Z: {result.z_no}"),
-        (f"Sign: {result.daily_signatures} / {result.total_signatures}", result.printed_datetime),
+        (f"{count_label}: {result.daily_signatures} / {result.total_signatures}", result.printed_datetime),
     ):
         joined = "   ".join(p for p in parts if p)
         lines.extend([joined] if len(joined) <= width else [p for p in parts if p])
+    if result.note:
+        lines.append(f"({result.note})")
     return [line for line in lines if line] + [rule]
 
 

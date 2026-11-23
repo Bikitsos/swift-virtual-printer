@@ -14,7 +14,7 @@ from PySide6.QtNetwork import QHostAddress, QNetworkInterface, QTcpServer, QTcpS
 from . import APP_NAME, __version__
 from .classify import ReceiptRule
 from .escpos import Cut, EscPosParser, elements_to_lines
-from .fiscal import FiscalSettings, SignResult, build_doc, insert_signature, sign_document
+from .fiscal import FiscalSettings, SignResult, build_doc, insert_signature, issue_z, sign_document
 from .forward import NETWORK, ForwardTarget, forward_async
 from .logo import ESC_INIT, LogoSettings, bitmap_to_escpos, inject, load_logo
 from .render import PdfRenderer
@@ -42,6 +42,7 @@ def zreports_dir_for(receipts_dir: Path) -> Path:
 class PrintServer(QObject):
     job_saved = Signal(Path)
     fiscal_failed = Signal(str, str)  # job name, error
+    fiscal_warning = Signal(str)
     _signed = Signal(object, str, object)
 
     def __init__(
@@ -59,6 +60,7 @@ class PrintServer(QObject):
         receipt_rule: ReceiptRule | None = None,
         zreport_rule: ReceiptRule | None = None,
         fiscal_sign: FiscalSettings | None = None,
+        fiscal_z: FiscalSettings | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -77,6 +79,8 @@ class PrintServer(QObject):
         self.zreport_rule = zreport_rule if zreport_rule and zreport_rule.pattern else None
         # Fiscal device (RESTful API) used to sign receipts before printing; None = no signing.
         self.fiscal_sign = fiscal_sign
+        # Fiscal device used to issue the daily Z when the POS prints a Z report; None = off.
+        self.fiscal_z = fiscal_z
         self._signed.connect(self._finish)
         self._logo_bytes = b""
         self.renderer = PdfRenderer(paper_mm, paper_dots)
@@ -107,6 +111,8 @@ class PrintServer(QObject):
             log.info("Adding a paper cut to jobs that have none")
         if self.fiscal_sign:
             log.info("Signing receipts with the fiscal device at %s", self.fiscal_sign)
+        if self.fiscal_z:
+            log.info("Issuing the fiscal Z when the POS prints a Z report (%s)", self.fiscal_z)
 
     @property
     def misc_dir(self) -> Path:
@@ -234,30 +240,62 @@ class PrintServer(QObject):
             doc = build_doc(elements_to_lines(EscPosParser(self.paper_dots).parse(printed)))
             settings = self.fiscal_sign
             log.info("Signing %s with the fiscal device...", stem)
+            self._run_fiscal(job, doc, lambda: sign_document(settings.host, settings.port, doc), "sign")
+        elif category == "zreport" and self.fiscal_z:
+            settings = self.fiscal_z
+            log.info("Issuing the fiscal Z (daily zeroset) for %s...", stem)
 
-            def sign() -> None:
-                try:
-                    result = sign_document(settings.host, settings.port, doc)
-                except Exception as exc:  # never lose the receipt because signing crashed
-                    result = SignResult(False, error=f"Signing failed: {exc}")
-                try:
-                    self._signed.emit(job, doc, result)
-                except RuntimeError:  # server was stopped and deleted meanwhile (settings applied)
-                    log.error("Print service restarted while signing %s; the job was not printed", stem)
+            def make_z() -> SignResult:
+                unsigned = self._unsigned_receipts_today()
+                if unsigned:
+                    message = f"{unsigned} receipt(s) from today are still unsigned and will not be in this Z"
+                    log.warning("%s", message)
+                    self.fiscal_warning.emit(message)
+                return issue_z(settings.host, settings.port)
 
-            threading.Thread(target=sign, name=f"sign-{stem}", daemon=True).start()
+            self._run_fiscal(job, "", make_z, "z")
         else:
             self._finish(job, "", None)
+
+    def _run_fiscal(self, job: dict, doc: str, call, kind: str) -> None:
+        """Run a fiscal device call in the background, then finish the job on the main thread."""
+        stem = job["stem"]
+
+        def run() -> None:
+            try:
+                result = call()
+            except Exception as exc:  # never lose the job because the fiscal call crashed
+                result = SignResult(False, error=f"Fiscal call failed: {exc}", kind=kind)
+            try:
+                self._signed.emit(job, doc, result)
+            except RuntimeError:  # server was stopped and deleted meanwhile (settings applied)
+                log.error("Print service restarted during the fiscal call for %s; the job was not printed", stem)
+
+        threading.Thread(target=run, name=f"fiscal-{stem}", daemon=True).start()
+
+    def _unsigned_receipts_today(self) -> int:
+        prefix = f"job_{datetime.now():%Y%m%d}_"
+        count = 0
+        for path in (self.output_dir / "json").glob(f"{prefix}*.json"):
+            try:
+                fiscal_record = json.loads(path.read_text(encoding="utf-8")).get("fiscal")
+            except (OSError, ValueError):
+                continue
+            if fiscal_record and not fiscal_record.get("signed"):
+                count += 1
+        return count
 
     def _finish(self, job: dict, doc: str, result: SignResult | None) -> None:
         stem, peer, data, root, category = job["stem"], job["peer"], job["data"], job["root"], job["category"]
         printed = job["printed"]
         if result is not None:
+            what = "Fiscal Z" if result.kind == "z" else "Fiscal signing"
             if result.ok:
-                log.info("Signed %s: %s (Z %s)", stem, result.signature, result.z_no)
+                log.info("%s for %s: %s (Z %s)%s", what, stem, result.signature, result.z_no,
+                         f" - {result.note}" if result.note else "")
             else:
-                log.warning("Fiscal signing of %s failed: %s", stem, result.error)
-                self.fiscal_failed.emit(stem, result.error)
+                log.warning("%s of %s failed: %s", what, stem, result.error)
+                self.fiscal_failed.emit(stem, f"{what}: {result.error}")
             printed = insert_signature(printed, result, self.paper_dots)
 
         pdf_path = root / "pdf" / f"{stem}.pdf"

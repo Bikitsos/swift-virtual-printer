@@ -122,6 +122,28 @@ The **Fiscal receipts** tab, next to **Jobs**, lists every receipt that was sent
 - **Reprint selected / Reprint:** a reprint of a **signed** receipt from the app gets a large, bold, centred **COPY** at the very top, and the JSON counts `copies_printed`. Reprints of unsigned receipts are printed unchanged.
 - **Preview** or double-click shows the final receipt.
 
+#### Fiscal Z (daily zeroset)
+
+With **Issue the fiscal Z (daily zeroset) when the POS prints a Z report** ticked (RESTful API only, off by default), a job that matches the [Z report rule](#z-reports) closes the fiscal day on the Cy-Net. No receipt data is sent: the device already holds the day's signatures.
+
+1. `check_system` is called first.
+   - If no receipts were signed since the last Z (`daily_signatures` = 0), the day is **not** closed again. `get_z` returns the last Z, and it is printed with the note *(Day already closed: last Z)*. This protects against a reprinted or duplicate Z report.
+   - Otherwise `make_z` issues the Z (up to 90 s, the device may print or ask for input).
+2. If receipts from today are still **UNSIGNED**, a tray warning appears, because they won't be part of this Z. Re-sign them first if you can.
+3. A Z block is added to the POS's Z report before the cut:
+
+```
+------------------------------------------------
+                FISCAL Z REPORT
+              72CC4C094B30462362B6
+              199AADD857BDC1B231D4
+            Device: CP 00699030   Z: 145
+       Signatures: 6 / 585   28/04/23 03:39
+------------------------------------------------
+```
+
+If it fails, the Z report prints *THERE IS NO FISCAL SIGNATURE DUE TO FISCAL DEVICE FAILURE*. It appears as **Z FAILED** in the Fiscal receipts tab, and in the Jobs list as *(Z report, Z FAILED)*. Select it and click **Re-sign / retry Z** (or right-click → *Retry fiscal Z*) when the device is back. The same check prevents a second Z if the day was closed in the meantime. Z reports are listed with type *Z report* and status *Z issued*, *Z (day already closed)* or *Z FAILED*. Reprints of a fiscal Z report also get **COPY**. On the command line: `--fiscal-z`.
+
 ### Service menu
 
 **Service → Service tools...** (also **Service...** in the tray menu) opens the administrative tools after you enter the service password. Ask your administrator for it. After 3 wrong attempts the menu is locked for 60 seconds.
