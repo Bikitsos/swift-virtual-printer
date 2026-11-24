@@ -56,7 +56,7 @@ from PySide6.QtWidgets import (
 from . import APP_NAME, COMPANY, CREDITS, __version__, app_root, build_info, default_receipts_dir
 from .admin import DEFAULT_PASSWORD_HASH, delete_job_files, folder_usage, format_size, hash_password, verify_password
 from .escpos import EscPosParser, elements_to_lines
-from .classify import DEFAULT_MARKER, DEFAULT_ZREPORT_MARKER, ReceiptRule
+from .classify import DEFAULT_MARKER, DEFAULT_ZREPORT_MARKER, ReceiptRule, remove_lines
 from .forward import NETWORK, OFF, WINDOWS, ForwardTarget, forward_async, list_windows_printers
 from .logo import LogoSettings, load_logo
 from .render import PdfRenderer, bitmap_to_qimage
@@ -714,6 +714,18 @@ class MainWindow(QMainWindow):
         )
         self.zreport_box.setLayout(zreport_form)
 
+        self.misc_remove_box = QGroupBox("Other documents (not receipts or Z reports): remove lines")
+        self.misc_remove_box.setCheckable(True)
+        self.misc_remove_edit = QPlainTextEdit()
+        self.misc_remove_edit.setPlaceholderText("One text per line, e.g.\nTABLE\nWaiter:")
+        self.misc_remove_edit.setFixedHeight(100)
+        misc_layout = QVBoxLayout(self.misc_remove_box)
+        misc_layout.addWidget(_hint(
+            "Every printed line that contains one of these texts is removed before printing (not case sensitive). "
+            "Formatting is kept; the as-received copy in bin/ and pdf/ is unchanged."
+        ))
+        misc_layout.addWidget(self.misc_remove_edit)
+
         test = QPushButton("Test on selected document")
         test.setToolTip("Uses the document selected in the main window, or the last one received.")
         test.clicked.connect(self.test_receipt_rule)
@@ -731,6 +743,7 @@ class MainWindow(QMainWindow):
         ))
         layout.addWidget(receipt_box)
         layout.addWidget(self.zreport_box)
+        layout.addWidget(self.misc_remove_box)
         layout.addLayout(test_row)
         layout.addStretch(1)
         return page
@@ -773,6 +786,11 @@ class MainWindow(QMainWindow):
             self.zreport_remove.isChecked(),
         )
 
+    def _misc_remove(self) -> tuple[str, ...]:
+        if not self.misc_remove_box.isChecked():
+            return ()
+        return tuple(t.strip() for t in self.misc_remove_edit.toPlainText().splitlines() if t.strip())
+
     def test_receipt_rule(self) -> None:
         job = next(iter(self._selected_jobs()), self.last_job)
         if job is None:
@@ -802,6 +820,9 @@ class MainWindow(QMainWindow):
             verdict = "RECEIPT (logo, receipts folder)"
         else:
             verdict = "Other document (no logo, misc folder)"
+            _, removed = remove_lines(job.bin.read_bytes(), self._misc_remove(), PAPER_SIZES[self.paper_combo.currentData()][1])
+            if removed:
+                verdict += "\nLines removed:\n" + "\n".join(f"   - {text}" for text in removed)
         rules = f"Receipt rule (>): {receipt_rule}\nZ report rule (Z): {zreport_rule or 'off'}"
         QMessageBox.information(
             self, "Test rules", f"{job.stem}\n{rules}\n\nResult: {verdict}\n\nText lines:\n{shown}"
@@ -1162,6 +1183,7 @@ class MainWindow(QMainWindow):
             f"auto cut: {self.auto_cut_check.isChecked()}, clean up jobs: {self.clean_check.isChecked()}",
             f"Receipt rule: {self._receipt_rule()} (remove marker: {self.marker_remove.isChecked()})",
             f"Z report rule: {self._zreport_rule() or 'off'}",
+            f"Remove from other documents: {', '.join(map(repr, self._misc_remove())) or 'off'}",
             f"Forwarding: {self.active_forward_target()}",
             f"Logo: {self._logo_settings()}",
             f"Fiscal device: {self._fiscal_settings()} - "
@@ -1523,6 +1545,8 @@ class MainWindow(QMainWindow):
         self.zreport_line.setValue(int(s.value("zreport_line", 0)))
         self.zreport_mode.setCurrentIndex(1 if s.value("zreport_contains", True, type=bool) else 0)
         self.zreport_remove.setChecked(s.value("zreport_remove", False, type=bool))
+        self.misc_remove_box.setChecked(s.value("misc_remove_enabled", False, type=bool))
+        self.misc_remove_edit.setPlainText(str(s.value("misc_remove_patterns", "")))
         self._update_logo_preview()
         self._loaded_settings = self._collect_settings()
 
@@ -1561,6 +1585,8 @@ class MainWindow(QMainWindow):
             "zreport_line": self.zreport_line.value(),
             "zreport_contains": bool(self.zreport_mode.currentData()),
             "zreport_remove": self.zreport_remove.isChecked(),
+            "misc_remove_enabled": self.misc_remove_box.isChecked(),
+            "misc_remove_patterns": self.misc_remove_edit.toPlainText().strip(),
         }
 
     def settings_changed(self) -> bool:
@@ -1609,6 +1635,7 @@ class MainWindow(QMainWindow):
             self._zreport_rule(),
             self._fiscal_sign_settings(),
             self._fiscal_z_settings(),
+            self._misc_remove(),
             parent=self,
         )
         try:

@@ -68,3 +68,24 @@ class ReceiptRule:
 
 def _has_text(chunk: bytes) -> bool:
     return any(line.strip() for line in elements_to_lines(EscPosParser().parse(chunk)))
+
+
+def remove_lines(data: bytes, patterns: tuple[str, ...], paper_dots: int = 576) -> tuple[bytes, list[str]]:
+    """Remove every printed line that contains one of the patterns (not case sensitive).
+
+    Only the line's text bytes and its line feed are removed; formatting commands are kept.
+    """
+    wanted = [p.strip().casefold() for p in patterns if p.strip()]
+    if not wanted:
+        return data, []
+    parser = EscPosParser(paper_dots)
+    parser.parse(data)
+    drop: set[int] = set()
+    removed = []
+    for text, offsets in parser.line_spans:
+        if any(p in text.casefold() for p in wanted):
+            drop.update(offsets)
+            removed.append(text.strip())
+    if not drop:
+        return data, []
+    return bytes(b for i, b in enumerate(data) if i not in drop), removed

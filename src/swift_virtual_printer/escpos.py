@@ -185,6 +185,10 @@ class EscPosParser:
         self.text_end: int | None = None
         self.text_end_before_cut: int | None = None
         self._line_has_text = False
+        # Per printed line: its text and the offsets of the bytes that printed it (text, tabs, final LF).
+        self.line_spans: list[tuple[str, list[int]]] = []
+        self._span: list[int] = []
+        self._span_text: list[str] = []
         try:
             while self._pos < len(data):
                 self._step(self._u8())
@@ -243,6 +247,9 @@ class EscPosParser:
             self.elements.append(Feed(spacing))
         if self._line_has_text:
             self.text_end = self._pos
+        if self._span_text:
+            self.line_spans.append(("".join(self._span_text), self._span))
+        self._span, self._span_text = [], []
         self._line_has_text = False
         self._line = []
         self._line_width = 0
@@ -264,11 +271,14 @@ class EscPosParser:
         if b in (LF, FF):
             if b == LF:
                 self.unterminated = False
+                self._span.append(self._pos - 1)
             self._newline()
         elif b == HT:
             cell_w = self.style.cell[0]
             for _ in range(8 - (self._line_width // cell_w) % 8):
                 self._add_char(" ")
+            self._span.append(self._pos - 1)
+            self._span_text.append(" ")
         elif b == ESC:
             self._esc(self._u8())
         elif b == GS:
@@ -278,7 +288,10 @@ class EscPosParser:
         elif b == DLE:
             self._dle(self._u8())
         elif b >= 0x20:
-            self._add_char(bytes([b]).decode(self.codepage, errors="replace"))
+            char = bytes([b]).decode(self.codepage, errors="replace")
+            self._add_char(char)
+            self._span.append(self._pos - 1)
+            self._span_text.append(char)
 
     def _esc(self, c: int) -> None:
         if c == 0x40:  # @ initialize

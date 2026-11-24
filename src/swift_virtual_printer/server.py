@@ -12,7 +12,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QHostAddress, QNetworkInterface, QTcpServer, QTcpSocket
 
 from . import APP_NAME, __version__
-from .classify import ReceiptRule
+from .classify import ReceiptRule, remove_lines
 from .escpos import Cut, EscPosParser, elements_to_lines
 from .fiscal import FiscalSettings, SignResult, build_doc, insert_signature, issue_z, sign_document
 from .forward import NETWORK, ForwardTarget, forward_async
@@ -61,6 +61,7 @@ class PrintServer(QObject):
         zreport_rule: ReceiptRule | None = None,
         fiscal_sign: FiscalSettings | None = None,
         fiscal_z: FiscalSettings | None = None,
+        misc_remove: tuple[str, ...] = (),
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -81,6 +82,8 @@ class PrintServer(QObject):
         self.fiscal_sign = fiscal_sign
         # Fiscal device used to issue the daily Z when the POS prints a Z report; None = off.
         self.fiscal_z = fiscal_z
+        # Printed lines containing any of these texts are removed from misc (non-fiscal) documents.
+        self.misc_remove = tuple(p for p in misc_remove if p.strip())
         self._signed.connect(self._finish)
         self._logo_bytes = b""
         self.renderer = PdfRenderer(paper_mm, paper_dots)
@@ -113,6 +116,8 @@ class PrintServer(QObject):
             log.info("Signing receipts with the fiscal device at %s", self.fiscal_sign)
         if self.fiscal_z:
             log.info("Issuing the fiscal Z when the POS prints a Z report (%s)", self.fiscal_z)
+        if self.misc_remove:
+            log.info("Removing lines containing %s from other documents", ", ".join(map(repr, self.misc_remove)))
 
     @property
     def misc_dir(self) -> Path:
@@ -199,6 +204,7 @@ class PrintServer(QObject):
         received_elements = received_parser.parse(data)
         received_lines = elements_to_lines(received_elements)
         receipt = False
+        removed_lines: list[str] = []
         if self.zreport_rule and self.zreport_rule.matches(received_lines):
             # Z reports are checked first and never get the logo.
             root, category = self.zreports_dir, "zreport"
@@ -212,7 +218,9 @@ class PrintServer(QObject):
             printed = self.receipt_rule.strip(data)
         else:
             root, category = self.misc_dir, "misc"
-            printed = data
+            printed, removed_lines = remove_lines(data, self.misc_remove, self.paper_dots)
+            if removed_lines:
+                log.info("Removed %d line(s) from %s: %s", len(removed_lines), stem, "; ".join(removed_lines))
 
         # Jobs from plain-text drivers (e.g. Windows "Generic / Text Only") don't reset the printer and can
         # leave the last line unprinted in its buffer, which then spoils the next job and blocks the cut.
@@ -235,6 +243,7 @@ class PrintServer(QObject):
             "stem": stem, "peer": peer, "received": received, "data": data, "printed": printed,
             "received_elements": received_elements, "root": root, "category": category, "receipt": receipt,
             "reset_added": reset_added, "line_end_added": line_end_added, "cut_added": cut_added,
+            "removed_lines": removed_lines,
         }
         if receipt and self.fiscal_sign:
             doc = build_doc(elements_to_lines(EscPosParser(self.paper_dots).parse(printed)))
@@ -330,6 +339,7 @@ class PrintServer(QObject):
                 "cut_added": job["cut_added"],
                 "printer_reset_added": job["reset_added"],
                 "line_end_added": job["line_end_added"],
+                "removed_lines": job["removed_lines"],
                 "line_count": len(lines),
                 "lines": {f"line_{i:03d}": text for i, text in enumerate(lines, 1)},
             }

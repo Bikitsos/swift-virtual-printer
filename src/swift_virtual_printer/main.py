@@ -42,6 +42,8 @@ def main() -> int:
     parser.add_argument("--fiscal-z", action="store_true", help="issue the fiscal Z (daily zeroset) when the POS prints a Z report")
     parser.add_argument("--fiscal-host", default="127.0.0.1", help="fiscal driver address (default: 127.0.0.1)")
     parser.add_argument("--fiscal-port", type=int, default=9999, help="fiscal driver port (default: 9999)")
+    parser.add_argument("--misc-remove", action="append", default=[], metavar="TEXT",
+                        help="remove printed lines containing TEXT from other (non-fiscal) documents; repeatable")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -77,6 +79,7 @@ def main() -> int:
         target, logo, args.auto_cut, not args.no_cleanup, rule, zreport_rule,
         FiscalSettings(REST, args.fiscal_host, args.fiscal_port) if args.fiscal_sign else None,
         FiscalSettings(REST, args.fiscal_host, args.fiscal_port) if args.fiscal_z else None,
+        tuple(args.misc_remove),
     )
     try:
         server.start()

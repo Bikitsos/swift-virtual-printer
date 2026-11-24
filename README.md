@@ -264,6 +264,10 @@ The POS marks real receipts with a marker text on a known line. The rule is set 
 
 All three kinds are forwarded to the real printer, shown in the main window (misc as type *Other* in grey, Z reports in blue), and can be previewed and reprinted. The `misc` and `zreports` folders sit next to the `receipts` folder and have the same subfolders. The Storage settings page can empty each of them. The as-received copies in `bin/` and `pdf/` still contain the markers. Greek markers work with the Greek code pages (`ESC t` 14 / 15 / 47).
 
+#### Removing lines from other documents
+
+**Other documents: remove lines** (Documents settings page, off by default) lists texts, one per line. In every *other* document (not a receipt or Z report, so never a fiscal document), each printed line that contains one of these texts is removed before printing. Matching is not case sensitive and works with Greek. Only the line's text and its line feed are removed; formatting commands (bold, alignment, cut) are kept. The removed lines are logged and listed in the job's JSON as `removed_lines`, and **Test on selected document** shows which lines would go. The as-received copy in `bin/` and `pdf/` is unchanged. On the command line: `--misc-remove TEXT` (repeatable).
+
 On the command line: `--receipt-marker TEXT`, `--marker-line N` (`0` = any line), `--marker-contains`, `--keep-marker`, `--zreport-marker TEXT` (empty = off), `--zreport-line N`, `--zreport-exact`.
 
 ## Saved receipts
